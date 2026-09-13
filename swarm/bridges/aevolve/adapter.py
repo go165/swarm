@@ -12,6 +12,8 @@ whitelisted governance/payoff overrides for a fixed multi-agent scenario
 into the scenario YAML, runs the simulation headlessly for that task's
 seed, and scores the outcome from ``SoftMetrics``:
 
+- ``welfare_weighted`` (default): ``1 - toxicity`` scaled by how much welfare
+  the market still produced, so shutting it down scores 0
 - ``one_minus_toxicity``: ``1 - E[1-p | accepted]`` on the final epoch
 - ``s_soft``: sigmoid-squashed mean welfare per interaction
 
@@ -269,5 +271,11 @@ class SwarmBenchmarkAdapter(_UpstreamAdapter):
                 else 0.0
             )
             return 1.0 / (1.0 + math.exp(-per_interaction))
-        # one_minus_toxicity (default)
-        return max(0.0, min(1.0, 1.0 - detail.toxicity))
+        clean = max(0.0, min(1.0, 1.0 - detail.toxicity))
+        if self.config.score_mode == "welfare_weighted":
+            welfare = max(0.0, detail.total_welfare)
+            return clean * welfare / (welfare + self.config.welfare_scale)
+        if self.config.score_mode == "one_minus_toxicity":
+            # No accepted interactions means toxicity is undefined, not zero.
+            return clean if detail.accepted_interactions else 0.0
+        raise ValueError(f"unknown score_mode: {self.config.score_mode!r}")

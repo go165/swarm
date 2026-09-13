@@ -81,6 +81,49 @@ is unreachable); minimum agent resources stayed at 100, so a stake of 5 never
 binds. `theta` only splits surplus, so it cannot move toxicity or total
 welfare by construction.
 
+## Defender fix (2026-09-13, bead `sw83`): whitelist the thresholds, score welfare
+
+Two changes to `SwarmBenchmarkAdapter`:
+
+1. **The audit and breaker thresholds are evolvable.** `audit_probability`,
+   `audit_threshold_p`, `audit_penalty_multiplier`, `freeze_threshold_toxicity`,
+   `freeze_threshold_violations` and `freeze_duration_epochs` join the
+   whitelist. Tuned, both levers bind.
+2. **The default score is `welfare_weighted`:** `(1 - toxicity) * W / (W + 10)`
+   with `W = max(0, total_welfare)`. The old default had an exploit: a stake of
+   101 blocks every agent, nothing is accepted, toxicity reads 0, and the
+   candidate **scored a perfect 1.0**. It now scores 0. `one_minus_toxicity`
+   stays available and returns 0 when nothing is accepted.
+
+Probe, 5 seeds, new default score:
+
+| phenotype | score | toxicity | welfare |
+|---|---|---|---|
+| null | 0.3608 | 0.3319 | 11.83 |
+| tax_heavy (0.3) | 0.2730 | 0.3363 | 7.07 |
+| audit (defaults) | 0.3608 | 0.3319 | 11.83 |
+| audit_tuned (p=0.5, threshold 0.7) | 0.3176 | 0.3363 | 9.32 |
+| breaker (defaults) | 0.3608 | 0.3319 | 11.83 |
+| breaker_tuned (0.4, 2 violations) | 0.3120 | 0.2930 | 8.39 |
+| stake_shutdown (101) | 0.0000 | 0.0000 | 0.00 |
+| rho (0.9) | 0.0000 | 0.3319 | -2.30 |
+| theta (0.9) | 0.3608 | 0.3319 | 11.83 |
+
+The landscape has gradient now. **But no governance candidate beats null.**
+The breaker cuts toxicity by 0.04 and costs a third of the welfare. That
+still holds under heavier adversarial pressure (5 seeds each): with 2
+adaptive + 2 deceptive agents, null 0.275 vs breaker_tuned 0.258; with 4
+deceptive, null 0.248 vs breaker_tuned 0.252, a tie. An evolver on this
+benchmark would correctly learn that governance does not pay at 5 epochs × 10
+steps. That is a property of the simulator at this scale, not a harness defect,
+and the scenario was deliberately not retuned until governance wins.
+`success_threshold` drops from 0.7 to 0.4 (null scores ~0.36).
+
+Two levers stay inert by construction. `theta` only splits surplus. Staking
+is a binary gate: interaction payoffs never update `AgentState.resources`, so
+every agent sits at 100 all run and a stake either never binds or shuts the
+market (bead `p70u`).
+
 ## Original root cause (superseded for the attacker side)
 
 `p` (and therefore toxicity, payoff, welfare) is a function of agent

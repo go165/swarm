@@ -69,7 +69,17 @@ DEFENDER_PHENOTYPES: Dict[str, Dict[str, Any]] = {
     "stake": {"governance.staking_enabled": True,
               "governance.min_stake_to_participate": 5.0},
     "audit": {"governance.audit_enabled": True},
+    "audit_tuned": {"governance.audit_enabled": True,
+                    "governance.audit_probability": 0.5,
+                    "governance.audit_threshold_p": 0.7},
     "breaker": {"governance.circuit_breaker_enabled": True},
+    "breaker_tuned": {"governance.circuit_breaker_enabled": True,
+                      "governance.freeze_threshold_toxicity": 0.4,
+                      "governance.freeze_threshold_violations": 2},
+    # Resources never move in this scenario (payoffs don't touch them), so a
+    # stake above the starting 100 blocks every agent: the market shuts down.
+    "stake_shutdown": {"governance.staking_enabled": True,
+                       "governance.min_stake_to_participate": 101.0},
     "rho": {"payoff.rho_a": 0.9, "payoff.rho_b": 0.9},
     "theta": {"payoff.theta": 0.9},
 }
