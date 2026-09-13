@@ -1,0 +1,98 @@
+[
+  {
+    "id": "D01",
+    "file": "planted.py",
+    "line": 30,
+    "function": "deposit",
+    "category": "wrong-bound",
+    "description": "A zero deposit is accepted and logged as a history entry."
+  },
+  {
+    "id": "D02",
+    "file": "planted.py",
+    "line": 38,
+    "function": "withdraw",
+    "category": "missing-check",
+    "description": "Frozen agents can withdraw; the freeze check was removed."
+  },
+  {
+    "id": "D03",
+    "file": "planted.py",
+    "line": 39,
+    "function": "withdraw",
+    "category": "wrong-bound",
+    "description": "Overdrafts of up to 1.0 are allowed."
+  },
+  {
+    "id": "D04",
+    "file": "planted.py",
+    "line": 47,
+    "function": "transfer",
+    "category": "ordering",
+    "description": "Credits dst before debiting src, so a failed withdraw leaves dst credited."
+  },
+  {
+    "id": "D05",
+    "file": "planted.py",
+    "line": 53,
+    "function": "apply_tax",
+    "category": "wrong-bound",
+    "description": "Rates above 1 are accepted, so tax can exceed the amount."
+  },
+  {
+    "id": "D06",
+    "file": "planted.py",
+    "line": 60,
+    "function": "epoch_entries",
+    "category": "off-by-one",
+    "description": "The window includes epoch == end, contradicting the half-open docstring."
+  },
+  {
+    "id": "D07",
+    "file": "planted.py",
+    "line": 66,
+    "function": "last_n_amounts",
+    "category": "off-by-one",
+    "description": "Returns n + 1 amounts."
+  },
+  {
+    "id": "D08",
+    "file": "planted.py",
+    "line": 71,
+    "function": "mean_balance",
+    "category": "missing-check",
+    "description": "An empty ledger raises ZeroDivisionError instead of returning 0.0."
+  },
+  {
+    "id": "D09",
+    "file": "planted.py",
+    "line": 76,
+    "function": "memo_prefix",
+    "category": "missing-none-check",
+    "description": "An entry without a memo raises TypeError."
+  },
+  {
+    "id": "D10",
+    "file": "planted.py",
+    "line": 81,
+    "function": "top_holders",
+    "category": "wrong-sort",
+    "description": "Sorts smallest balances first, so it returns the bottom k."
+  },
+  {
+    "id": "D11",
+    "file": "planted.py",
+    "line": 89,
+    "function": "freeze_if_overdrawn",
+    "category": "sign-error",
+    "description": "Freezes every agent below +limit, including solvent ones."
+  },
+  {
+    "id": "D12",
+    "file": "planted.py",
+    "line": 105,
+    "function": "merge_ledgers",
+    "category": "aliasing",
+    "description": "Merging mutates ledger a through shared dict/list/set references."
+  }
+]

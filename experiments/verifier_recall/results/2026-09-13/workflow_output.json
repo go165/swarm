@@ -1,0 +1,480 @@
+{
+  "unique": [
+    {
+      "fid": "F01",
+      "line": 36,
+      "summary": "withdraw ignores frozen agents despite docstring promise",
+      "failure_scenario": "Calling withdraw on a frozen agent succeeds instead of refusing. Docstring says 'refusing overdrafts and frozen agents' but no frozen check exists",
+      "reviewers": [
+        2
+      ]
+    },
+    {
+      "fid": "F02",
+      "line": 39,
+      "summary": "withdraw allows overdrafts up to 1.0 unit",
+      "failure_scenario": "balance=100, amount=100.5 does not raise ValueError even though it exceeds balance",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F03",
+      "line": 45,
+      "summary": "transfer is not atomic: deposit succeeds before withdraw attempt",
+      "failure_scenario": "If deposit(dst) succeeds but withdraw(src) fails, ledger is left in inconsistent state. Docstring says 'atomically' but no transaction handling exists",
+      "reviewers": [
+        2
+      ]
+    },
+    {
+      "fid": "F04",
+      "line": 48,
+      "summary": "transfer() violates atomicity contract: deposit succeeds before withdraw, leaving inconsistent state if withdraw fails",
+      "failure_scenario": "If deposit(dst) succeeds but withdraw(src) raises ValueError (insufficient funds), the destination has been credited but the source debited, violating the atomicity promised in the docstring",
+      "reviewers": [
+        3
+      ]
+    },
+    {
+      "fid": "F05",
+      "line": 53,
+      "summary": "apply_tax rate range [0, 100] does not match documented [0, 1]",
+      "failure_scenario": "rate=50 passes validation and produces 50x tax instead of 50% tax",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F06",
+      "line": 60,
+      "summary": "epoch_entries uses closed interval instead of half-open interval",
+      "failure_scenario": "epoch_entries(ledger, 1, 5) includes epoch=5 when docstring specifies it should not",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F07",
+      "line": 66,
+      "summary": "last_n_amounts returns n+1 elements instead of n",
+      "failure_scenario": "last_n_amounts(ledger, agent_id, 2) on 5-element history returns 3 amounts instead of 2",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F08",
+      "line": 71,
+      "summary": "mean_balance raises ZeroDivisionError on empty ledger",
+      "failure_scenario": "Empty ledger causes ZeroDivisionError; docstring promises 0.0",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F09",
+      "line": 76,
+      "summary": "memo_prefix raises TypeError when entry.memo is None",
+      "failure_scenario": "entry.memo=None causes TypeError on slicing; docstring promises empty string",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F10",
+      "line": 81,
+      "summary": "top_holders returns k smallest balances instead of largest",
+      "failure_scenario": "top_holders(ledger, 2) returns agents with lowest balances, not highest",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "fid": "F11",
+      "line": 89,
+      "summary": "freeze_if_overdrawn condition is inverted",
+      "failure_scenario": "limit=100, balance=50 is incorrectly frozen; should only freeze if balance < -limit",
+      "reviewers": [
+        1,
+        3
+      ]
+    },
+    {
+      "fid": "F12",
+      "line": 105,
+      "summary": "merge_ledgers does not copy objects, violating the contract",
+      "failure_scenario": "Modifications to merged ledger directly mutate the input ledgers; docstring says inputs are unchanged",
+      "reviewers": [
+        1,
+        2,
+        3
+      ]
+    }
+  ],
+  "verifiers": [
+    [
+      {
+        "fid": "F01",
+        "refuted": false,
+        "reason": "withdraw() has no check for frozen agents despite docstring promise; the frozen set is never consulted"
+      },
+      {
+        "fid": "F02",
+        "refuted": false,
+        "reason": "withdraw() check `amount > balance + 1.0` allows overdrafts up to 1.0; balance=100, amount=100.5 passes because 100.5 is not > 101"
+      },
+      {
+        "fid": "F03",
+        "refuted": false,
+        "reason": "transfer() calls deposit() then withdraw() with no atomicity mechanism; if withdraw() fails after deposit() succeeds, ledger is inconsistent"
+      },
+      {
+        "fid": "F04",
+        "refuted": false,
+        "reason": "transfer() violates atomicity: deposit(dst) executed before withdraw(src) leaves destination credited if withdraw() raises ValueError"
+      },
+      {
+        "fid": "F05",
+        "refuted": false,
+        "reason": "apply_tax checks `0.0 <= rate <= 100.0` but docstring specifies `[0, 1]`; rate=50 computes 50x tax instead of 50%"
+      },
+      {
+        "fid": "F06",
+        "refuted": false,
+        "reason": "epoch_entries uses `start <= e.epoch <= end` (closed interval) instead of `start <= e.epoch < end` (half-open); epoch=5 is incorrectly included"
+      },
+      {
+        "fid": "F07",
+        "refuted": false,
+        "reason": "last_n_amounts returns `amounts[-n-1:]` which is n+1 elements; n=2 on 5-element list returns 3 amounts"
+      },
+      {
+        "fid": "F08",
+        "refuted": false,
+        "reason": "mean_balance() divides by len(ledger.balances); empty ledger causes ZeroDivisionError instead of returning 0.0 as promised"
+      },
+      {
+        "fid": "F09",
+        "refuted": false,
+        "reason": "memo_prefix() slices None when entry.memo is None; raises TypeError instead of returning empty string as docstring promises"
+      },
+      {
+        "fid": "F10",
+        "refuted": false,
+        "reason": "top_holders sorts ascending and takes first k elements, returning k smallest balances; should return largest"
+      },
+      {
+        "fid": "F11",
+        "refuted": false,
+        "reason": "freeze_if_overdrawn checks `balance < limit` instead of `balance < -limit`; freezes wrong agents relative to docstring spec"
+      },
+      {
+        "fid": "F12",
+        "refuted": false,
+        "reason": "merge_ledgers assigns references (balances=a.balances) instead of copying; modifications to merged ledger mutate inputs, violating contract"
+      }
+    ],
+    [
+      {
+        "fid": "F01",
+        "refuted": false,
+        "reason": "No frozen check exists despite docstring promise; agent in ledger.frozen is never tested"
+      },
+      {
+        "fid": "F02",
+        "refuted": false,
+        "reason": "Condition 'amount > balance + 1.0' allows overdrafts up to 1.0 unit; balance=100, amount=100.5 does not raise"
+      },
+      {
+        "fid": "F03",
+        "refuted": false,
+        "reason": "deposit executes before withdraw; if withdraw raises ValueError, deposit has already modified state"
+      },
+      {
+        "fid": "F04",
+        "refuted": false,
+        "reason": "Same atomicity violation as F03; deposit(dst) succeeds before withdraw(src) is attempted"
+      },
+      {
+        "fid": "F05",
+        "refuted": false,
+        "reason": "Validation checks [0, 100] but docstring specifies [0, 1]; rate=50 is accepted and produces 50x multiplier"
+      },
+      {
+        "fid": "F06",
+        "refuted": false,
+        "reason": "Filter uses '<= end' (closed) instead of '< end' (half-open); epoch=5 is included when it should not be"
+      },
+      {
+        "fid": "F07",
+        "refuted": false,
+        "reason": "Slice 'amounts[-n-1:]' returns n+1 elements; with n=2 returns last 3 elements, not 2"
+      },
+      {
+        "fid": "F08",
+        "refuted": false,
+        "reason": "len(ledger.balances) is 0 on empty dict, causing ZeroDivisionError; docstring promises 0.0"
+      },
+      {
+        "fid": "F09",
+        "refuted": false,
+        "reason": "entry.memo[:width] raises TypeError when memo is None; cannot slice NoneType"
+      },
+      {
+        "fid": "F10",
+        "refuted": false,
+        "reason": "sorted() with default ascending order + [:k] returns k smallest; should use reverse=True or [-k:]"
+      },
+      {
+        "fid": "F11",
+        "refuted": false,
+        "reason": "Condition 'balance < limit' is wrong; docstring says freeze if 'balance < -limit'; negation is missing"
+      },
+      {
+        "fid": "F12",
+        "refuted": false,
+        "reason": "Assignment 'balances=a.balances' does not copy; modifications to merged.balances mutate a.balances"
+      }
+    ],
+    [
+      {
+        "fid": "F01",
+        "refuted": false,
+        "reason": "Docstring promises to refuse frozen agents but the code contains no check for `agent_id in ledger.frozen`"
+      },
+      {
+        "fid": "F02",
+        "refuted": false,
+        "reason": "Line 39 condition `amount > balance + 1.0` allows up to 1.0 unit overdraft; balance=100, amount=100.5 does not raise"
+      },
+      {
+        "fid": "F03",
+        "refuted": false,
+        "reason": "deposit() executes before withdraw(); if withdraw() fails, deposit already committed, violating atomicity"
+      },
+      {
+        "fid": "F04",
+        "refuted": false,
+        "reason": "Same as F03: deposit succeeds at line 47, withdraw failure at line 48 leaves ledger inconsistent despite atomicity promise"
+      },
+      {
+        "fid": "F05",
+        "refuted": false,
+        "reason": "Line 53 validates range [0, 100] but docstring specifies [0, 1]; rate=50 multiplies by 50 instead of 0.50"
+      },
+      {
+        "fid": "F06",
+        "refuted": false,
+        "reason": "Line 60 uses `<=` for end boundary instead of `<`, creating closed interval [start, end] instead of half-open [start, end)"
+      },
+      {
+        "fid": "F07",
+        "refuted": false,
+        "reason": "Line 66 slice `amounts[-n-1:]` returns n+1 elements; for n=2 it returns amounts[-3:] which is 3 elements"
+      },
+      {
+        "fid": "F08",
+        "refuted": false,
+        "reason": "Line 71 divides by len(ledger.balances) which is 0 for empty ledger, raising ZeroDivisionError despite docstring promising 0.0"
+      },
+      {
+        "fid": "F09",
+        "refuted": false,
+        "reason": "Line 76 calls entry.memo[:width] which raises TypeError when memo is None, violating docstring promise of empty string"
+      },
+      {
+        "fid": "F10",
+        "refuted": false,
+        "reason": "Line 81 sorts ascending by balance, line 82 returns smallest k agents, contradicting docstring requirement for largest balances"
+      },
+      {
+        "fid": "F11",
+        "refuted": false,
+        "reason": "Line 89 condition `balance < limit` is missing the negation; should be `balance < -limit` per docstring"
+      },
+      {
+        "fid": "F12",
+        "refuted": false,
+        "reason": "Line 105 assigns same dict/list/set objects without copying; mutations to merged ledger directly mutate inputs, violating docstring"
+      }
+    ]
+  ],
+  "raw_reviews": [
+    {
+      "findings": [
+        {
+          "line": 39,
+          "summary": "withdraw allows overdrafts up to 1.0 unit",
+          "failure_scenario": "balance=100, amount=100.5 does not raise ValueError even though it exceeds balance"
+        },
+        {
+          "line": 53,
+          "summary": "apply_tax rate range [0, 100] does not match documented [0, 1]",
+          "failure_scenario": "rate=50 passes validation and produces 50x tax instead of 50% tax"
+        },
+        {
+          "line": 60,
+          "summary": "epoch_entries uses closed interval instead of half-open interval",
+          "failure_scenario": "epoch_entries(ledger, 1, 5) includes epoch=5 when docstring specifies it should not"
+        },
+        {
+          "line": 66,
+          "summary": "last_n_amounts returns n+1 elements instead of n",
+          "failure_scenario": "last_n_amounts(ledger, agent_id, 2) on 5-element history returns 3 amounts instead of 2"
+        },
+        {
+          "line": 71,
+          "summary": "mean_balance raises ZeroDivisionError on empty ledger",
+          "failure_scenario": "Empty ledger causes ZeroDivisionError; docstring promises 0.0"
+        },
+        {
+          "line": 76,
+          "summary": "memo_prefix raises TypeError when entry.memo is None",
+          "failure_scenario": "entry.memo=None causes TypeError on slicing; docstring promises empty string"
+        },
+        {
+          "line": 81,
+          "summary": "top_holders returns k smallest balances instead of largest",
+          "failure_scenario": "top_holders(ledger, 2) returns agents with lowest balances, not highest"
+        },
+        {
+          "line": 89,
+          "summary": "freeze_if_overdrawn condition is inverted",
+          "failure_scenario": "limit=100, balance=50 is incorrectly frozen; should only freeze if balance < -limit"
+        },
+        {
+          "line": 105,
+          "summary": "merge_ledgers does not copy objects, violating the contract",
+          "failure_scenario": "Modifications to merged ledger directly mutate the input ledgers; docstring says inputs are unchanged"
+        }
+      ]
+    },
+    {
+      "findings": [
+        {
+          "line": 71,
+          "summary": "Division by zero in mean_balance on empty ledger",
+          "failure_scenario": "Calling mean_balance(Ledger(balances={}, history=[], frozen=set())) raises ZeroDivisionError instead of returning 0.0 as documented"
+        },
+        {
+          "line": 76,
+          "summary": "TypeError when memo is None in memo_prefix",
+          "failure_scenario": "Calling memo_prefix(Entry('agent1', 10.0, 1, memo=None), 5) raises TypeError: 'NoneType' object is not subscriptable instead of returning '' as documented"
+        },
+        {
+          "line": 81,
+          "summary": "top_holders returns smallest holders, not largest",
+          "failure_scenario": "With balances {'a': 100, 'b': 50, 'c': 25}, top_holders(ledger, 2) returns ['c', 'b'] (smallest) instead of ['a', 'b'] (largest). Sorts ascending then takes [:k] instead of descending."
+        },
+        {
+          "line": 53,
+          "summary": "apply_tax range check allows invalid rates up to 100.0",
+          "failure_scenario": "apply_tax(100, 50.0) succeeds and returns 5000.0, but docstring says rate must be in [0, 1]. Range check should be 0.0 <= rate <= 1.0, not 100.0"
+        },
+        {
+          "line": 60,
+          "summary": "epoch_entries uses closed interval instead of half-open as documented",
+          "failure_scenario": "With entry at epoch=5, epoch_entries(ledger, 1, 5) includes it (uses <=), but half-open interval [1, 5) should exclude epoch 5"
+        },
+        {
+          "line": 66,
+          "summary": "last_n_amounts returns n+1 items instead of n",
+          "failure_scenario": "With 3 entries for an agent, last_n_amounts(ledger, 'agent', 1) returns 2 items (amounts[-2:]) instead of 1 item (amounts[-1:])"
+        },
+        {
+          "line": 39,
+          "summary": "withdraw allows overdrafts up to 1.0, contradicting docstring",
+          "failure_scenario": "withdraw(ledger, 'agent', 10.0, 1) succeeds when agent balance is 9.5, even though docstring says 'refusing overdrafts'. Should check amount > balance, not amount > balance + 1.0"
+        },
+        {
+          "line": 36,
+          "summary": "withdraw ignores frozen agents despite docstring promise",
+          "failure_scenario": "Calling withdraw on a frozen agent succeeds instead of refusing. Docstring says 'refusing overdrafts and frozen agents' but no frozen check exists"
+        },
+        {
+          "line": 45,
+          "summary": "transfer is not atomic: deposit succeeds before withdraw attempt",
+          "failure_scenario": "If deposit(dst) succeeds but withdraw(src) fails, ledger is left in inconsistent state. Docstring says 'atomically' but no transaction handling exists"
+        },
+        {
+          "line": 105,
+          "summary": "merge_ledgers performs shallow copy, corrupting input ledgers",
+          "failure_scenario": "merged = merge_ledgers(a, b); merged.balances['x'] = 999 also modifies a.balances['x'] since they reference the same dict. Docstring says 'inputs unchanged' but they are modified"
+        }
+      ]
+    },
+    {
+      "findings": [
+        {
+          "line": 48,
+          "summary": "transfer() violates atomicity contract: deposit succeeds before withdraw, leaving inconsistent state if withdraw fails",
+          "failure_scenario": "If deposit(dst) succeeds but withdraw(src) raises ValueError (insufficient funds), the destination has been credited but the source debited, violating the atomicity promised in the docstring"
+        },
+        {
+          "line": 39,
+          "summary": "withdraw() allows 1.0 overdraft despite docstring promising to refuse overdrafts",
+          "failure_scenario": "If balance=5.0 and amount=5.5, the check 5.5 > 5.0 + 1.0 is false, so the withdrawal succeeds and balance becomes -0.5, contradicting 'refusing overdrafts'"
+        },
+        {
+          "line": 53,
+          "summary": "apply_tax() validates rate in [0, 100] but docstring specifies [0, 1]",
+          "failure_scenario": "A rate of 50 passes validation (within [0, 100]) and multiplies amount by 50, producing 5000% tax instead of the intended 50% when rate should be normalized to [0, 1]"
+        },
+        {
+          "line": 60,
+          "summary": "epoch_entries() uses closed interval (both ends <=) but docstring specifies half-open [start, end)",
+          "failure_scenario": "If start=10, end=20, an entry with epoch=20 is included in the result, but docstring says 'start <= epoch < end' which should exclude end"
+        },
+        {
+          "line": 66,
+          "summary": "last_n_amounts() off-by-one error: returns n+1 elements instead of n",
+          "failure_scenario": "For n=1 with amounts=[10, 20, 30], amounts[-1-1:] = amounts[-2:] returns [20, 30] (2 elements) instead of [30] (1 element)"
+        },
+        {
+          "line": 71,
+          "summary": "mean_balance() raises ZeroDivisionError on empty ledger, contradicting docstring's '0.0 for an empty ledger'",
+          "failure_scenario": "With an empty balances dict, sum() returns 0 but len() returns 0, causing division by zero instead of returning 0.0"
+        },
+        {
+          "line": 76,
+          "summary": "memo_prefix() crashes when entry.memo is None, contradicting docstring's \"or '' when there is none\"",
+          "failure_scenario": "If entry.memo is None, entry.memo[:width] raises TypeError instead of returning empty string"
+        },
+        {
+          "line": 81,
+          "summary": "top_holders() returns k smallest balances, not largest as promised in docstring",
+          "failure_scenario": "With balances={'a': 100, 'b': 50, 'c': 10} and k=2, sorted ascending then [:k] returns ['c', 'b'], not ['a', 'b'] (largest first)"
+        },
+        {
+          "line": 89,
+          "summary": "freeze_if_overdrawn() checks 'balance < limit' when docstring specifies 'below -limit'",
+          "failure_scenario": "With limit=10 and balance=5, the check balance < 10 is true and agent is frozen, but docstring requires checking against -limit, freezing only those with balance < -10"
+        },
+        {
+          "line": 105,
+          "summary": "merge_ledgers() aliases input ledger a's mutable fields, violating docstring's 'inputs unchanged'",
+          "failure_scenario": "Modifying merged.balances or merged.history also mutates the original ledger a, since Ledger(balances=a.balances, ...) shares the same dict and list objects, not copies"
+        }
+      ]
+    }
+  ],
+  "logs": [
+    "review: 29 raw findings, 12 after exact-line dedup"
+  ],
+  "agent_count": 6
+}
