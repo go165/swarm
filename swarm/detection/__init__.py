@@ -38,9 +38,13 @@ from swarm.detection.market import (
     pooled_window,
 )
 from swarm.detection.stats import (
+    ZERO_SD_REL_TOL,
+    EffectSize,
     PairedComparison,
     compute_paired_stats,
+    hedges_g,
     paired_comparison,
+    paired_hedges_g,
 )
 
 __all__ = [
@@ -52,6 +56,10 @@ __all__ = [
     "PairedComparison",
     "paired_comparison",
     "compute_paired_stats",
+    "EffectSize",
+    "ZERO_SD_REL_TOL",
+    "hedges_g",
+    "paired_hedges_g",
     "StreamConfig",
     "PopulationConfig",
     "AgentStream",
