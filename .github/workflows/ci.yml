@@ -17,6 +17,27 @@ jobs:
       - run: python -m pip install ruff
       - run: ruff check swarm/ tests/
 
+  # The Next.js viz app had no CI at all: a red lint, type, or build error
+  # (e.g. the use-media-query set-state-in-effect breakage) reached main
+  # unnoticed. Warnings don't fail the job; errors do.
+  viz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: viz
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viz/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run build
+
   invariants:
     # INVARIANTS.md must map every declared invariant to a pytest node that
     # collects — an invariant without a running test is prose, not an
