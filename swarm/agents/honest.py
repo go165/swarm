@@ -54,6 +54,9 @@ class HonestAgent(BaseAgent):
         self.post_probability = self.config.get("post_probability", 0.3)
         self.vote_probability = self.config.get("vote_probability", 0.5)
         self.interact_probability = self.config.get("interact_probability", 0.4)
+        # Accept on max(trust, receipt p) when a receipt backs the proposal
+        # (bead iujo). Off by default: honest acceptance is unchanged.
+        self.trust_artifacts = bool(self.config.get("trust_artifacts", False))
 
     def act(self, observation: Observation) -> Action:
         """
@@ -139,6 +142,8 @@ class HonestAgent(BaseAgent):
         """
         # Check trust level
         trust = self.compute_counterparty_trust(proposal.initiator_id)
+        if self.trust_artifacts:
+            trust = max(trust, self._receipt_p(proposal, observation))
 
         # Base acceptance on trust and threshold
         threshold = self.acceptance_threshold
@@ -153,6 +158,25 @@ class HonestAgent(BaseAgent):
         effective_score = trust * self.trust_weight + 0.5 * (1 - self.trust_weight)
 
         return bool(effective_score >= threshold)
+
+    @staticmethod
+    def _receipt_p(proposal: InteractionProposal, observation: Observation) -> float:
+        """p of the receipt backing a proposal, or 0.0 if none is visible.
+
+        A presented receipt is taken at face value if it is visible; otherwise
+        the initiator's own best receipt stands in. Verifying that a presented
+        receipt belongs to its presenter is governance's job (context binding),
+        not the counterparty's.
+        """
+        from swarm.governance.artifact_replay import PRESENTED_KEY, RECEIPT_KIND
+
+        receipts = [a for a in observation.available_artifacts if a.get("kind") == RECEIPT_KIND]
+        presented = proposal.metadata.get(PRESENTED_KEY)
+        if presented:
+            chosen = [a for a in receipts if a.get("artifact_id") == presented]
+        else:
+            chosen = [a for a in receipts if a.get("producer_id") == proposal.initiator_id]
+        return max((float(a.get("p_at_production", 0.0)) for a in chosen), default=0.0)
 
     def propose_interaction(
         self,

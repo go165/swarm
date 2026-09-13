@@ -11,6 +11,7 @@ import yaml
 
 from swarm.agents.adaptive_adversary import AdaptiveAdversary
 from swarm.agents.adversarial import AdversarialAgent
+from swarm.agents.artifact_replayer import ArtifactReplayerAgent
 from swarm.agents.awm_agent import AWMAgent
 from swarm.agents.base import BaseAgent
 from swarm.agents.behavioral import CautiousAgent
@@ -113,6 +114,7 @@ AGENT_TYPES: Dict[str, Type[BaseAgent]] = {
     "deceptive": DeceptiveAgent,
     "adversarial": AdversarialAgent,
     "adaptive_adversary": AdaptiveAdversary,
+    "artifact_replayer": ArtifactReplayerAgent,
     "modeling_adversary": ModelingAdversary,
     "diligent_editor": DiligentEditorAgent,
     "point_farmer": PointFarmerAgent,
@@ -540,6 +542,18 @@ def parse_governance_config(data: Dict[str, Any]) -> GovernanceConfig:
         hardware_trust_recovery_max_steps=data.get(
             "hardware_trust_recovery_max_steps", 10
         ),
+        artifact_receipts_enabled=data.get("artifact_receipts_enabled", False),
+        artifact_context_binding_enabled=data.get(
+            "artifact_context_binding_enabled", False
+        ),
+        artifact_replay_detection_enabled=data.get(
+            "artifact_replay_detection_enabled", False
+        ),
+        artifact_replay_detection_rate=data.get("artifact_replay_detection_rate", 0.5),
+        artifact_replay_false_positive_rate=data.get(
+            "artifact_replay_false_positive_rate", 0.05
+        ),
+        artifact_replay_penalty=data.get("artifact_replay_penalty", 1.0),
     )
     # Pydantic auto-validates
     return config

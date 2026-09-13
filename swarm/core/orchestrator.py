@@ -1376,6 +1376,10 @@ class Orchestrator:
 
             from swarm.agents.base import InteractionProposal as AgentProposal
 
+            if self.governance_engine is not None:
+                self.governance_engine.screen_artifact_presentation(
+                    proposal.metadata, proposal.initiator_id, self.state
+                )
             agent_proposal = AgentProposal(
                 proposal_id=proposal.proposal_id,
                 initiator_id=proposal.initiator_id,
@@ -1383,6 +1387,7 @@ class Orchestrator:
                 interaction_type=InteractionType(proposal.interaction_type),
                 content=proposal.content,
                 offered_transfer=proposal.metadata.get("offered_transfer", 0),
+                metadata=dict(proposal.metadata),
             )
 
             accept = counterparty.accept_interaction(agent_proposal, observation)
@@ -1922,6 +1927,10 @@ class Orchestrator:
 
             from swarm.agents.base import InteractionProposal as AgentProposal
 
+            if self.governance_engine is not None:
+                self.governance_engine.screen_artifact_presentation(
+                    proposal.metadata, proposal.initiator_id, self.state
+                )
             agent_proposal = AgentProposal(
                 proposal_id=proposal.proposal_id,
                 initiator_id=proposal.initiator_id,
@@ -1929,6 +1938,7 @@ class Orchestrator:
                 interaction_type=InteractionType(proposal.interaction_type),
                 content=proposal.content,
                 offered_transfer=proposal.metadata.get("offered_transfer", 0),
+                metadata=dict(proposal.metadata),
             )
 
             if self._is_llm_agent(counterparty):

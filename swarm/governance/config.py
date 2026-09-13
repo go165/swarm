@@ -263,6 +263,17 @@ class GovernanceConfig(BaseModel):
     cascade_risk_p_threshold: float = 0.3  # Descendants below this p are "bad"
     cascade_risk_window: int = 200  # Rolling interaction window for DAG analysis
 
+    # Artifact replay (bead iujo): receipts carry an interaction's p; binding
+    # (prevention) refuses a receipt presented by anyone but its producer
+    # before acceptance; the detector (detection) penalizes caught replays
+    # after acceptance, with a false-positive rate on other interactions.
+    artifact_receipts_enabled: bool = False
+    artifact_context_binding_enabled: bool = False
+    artifact_replay_detection_enabled: bool = False
+    artifact_replay_detection_rate: float = 0.5
+    artifact_replay_false_positive_rate: float = 0.05
+    artifact_replay_penalty: float = 1.0
+
     @model_validator(mode="after")
     def _run_validation(self) -> "GovernanceConfig":
         self._check_values()
@@ -553,3 +564,9 @@ class GovernanceConfig(BaseModel):
             raise ValueError("cascade_risk_p_threshold must be in [0, 1]")
         if self.cascade_risk_window < 1:
             raise ValueError("cascade_risk_window must be >= 1")
+        if not 0.0 <= self.artifact_replay_detection_rate <= 1.0:
+            raise ValueError("artifact_replay_detection_rate must be in [0, 1]")
+        if not 0.0 <= self.artifact_replay_false_positive_rate <= 1.0:
+            raise ValueError("artifact_replay_false_positive_rate must be in [0, 1]")
+        if self.artifact_replay_penalty < 0:
+            raise ValueError("artifact_replay_penalty must be non-negative")
