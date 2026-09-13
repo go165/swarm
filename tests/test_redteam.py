@@ -83,7 +83,8 @@ class TestAdversaryMemory:
         """Test initial memory state."""
         memory = AdversaryMemory()
         assert memory.current_heat_level == 0.0
-        assert memory.epochs_since_detection == 0
+        # Never detected is not the same as detected this epoch.
+        assert memory.epochs_since_detection >= 2
 
     def test_heat_update_on_detection(self):
         """Test heat increases on detection."""
