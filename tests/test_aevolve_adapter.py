@@ -118,6 +118,58 @@ def test_s_soft_score_mode_stays_in_range():
     assert feedback.raw["score_mode"] == "s_soft"
 
 
+def _score(adapter, payload):
+    task = adapter.get_tasks()[0]
+    return adapter.evaluate(task, _trajectory(task, payload))
+
+
+def test_default_score_does_not_reward_shutting_the_market_down(adapter):
+    # Resources start at 100 and payoffs never move them, so this stake blocks
+    # every agent. Under one_minus_toxicity that scored a perfect 1.0.
+    shutdown = _score(adapter, {"governance.staking_enabled": True,
+                                "governance.min_stake_to_participate": 101.0})
+    assert shutdown.raw["total_welfare"] == 0.0
+    assert shutdown.score == 0.0
+    assert not shutdown.success
+    assert _score(adapter, {}).score > 0.0
+
+
+def test_one_minus_toxicity_scores_zero_when_nothing_is_accepted():
+    adapter = SwarmBenchmarkAdapter(AevolveBridgeConfig(n_tasks=1, score_mode="one_minus_toxicity"))
+    shutdown = _score(adapter, {"governance.staking_enabled": True,
+                                "governance.min_stake_to_participate": 101.0})
+    assert shutdown.score == 0.0
+
+
+def test_welfare_weighted_registers_welfare_moves(adapter):
+    null = _score(adapter, {})
+    taxed = _score(adapter, {"governance.transaction_tax_rate": 0.3})
+    assert taxed.raw["total_welfare"] < null.raw["total_welfare"]
+    assert taxed.score < null.score
+
+
+@pytest.mark.parametrize("tuned", [
+    {"governance.audit_enabled": True, "governance.audit_probability": 0.5,
+     "governance.audit_threshold_p": 0.7},
+    {"governance.circuit_breaker_enabled": True,
+     "governance.freeze_threshold_toxicity": 0.4,
+     "governance.freeze_threshold_violations": 2},
+])
+def test_tuned_audit_and_breaker_move_the_score(adapter, tuned):
+    """Enabled at their defaults these levers never trigger at benchmark scale
+    and scored exactly the null candidate (beads 2qgp, sw83). Their thresholds
+    are whitelisted so a candidate can make them bind."""
+    result = _score(adapter, tuned)
+    assert result.raw["rejected_overrides"] == {}
+    assert result.score != _score(adapter, {}).score
+
+
+def test_unknown_score_mode_raises():
+    adapter = SwarmBenchmarkAdapter(AevolveBridgeConfig(n_tasks=1, score_mode="nope"))
+    with pytest.raises(ValueError, match="score_mode"):
+        _score(adapter, {})
+
+
 # ---------------------------------------------------------------------------
 # domain: the evolution loop under the soft-label lens
 # ---------------------------------------------------------------------------
