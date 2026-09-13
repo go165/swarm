@@ -25,6 +25,12 @@ if TYPE_CHECKING:
 # ----- Memory bounds -----
 MAX_TRACKING_SET_SIZE: int = 200
 
+# Starting value for the epochs-since counters: far enough back that an agent
+# which has never been detected or penalized does not read as "just caught".
+# A 0 here made _should_lay_low true forever unless someone called
+# update_adversary_outcome, and nothing in the run loop does (beads-2qgp).
+NEVER: int = 10**6
+
 
 class AttackStrategy(Enum):
     """Types of adversarial attack strategies."""
@@ -118,8 +124,8 @@ class AdversaryMemory:
     potential_allies: Set[str] = field(default_factory=set)
 
     # Timing
-    epochs_since_detection: int = 0
-    epochs_since_penalty: int = 0
+    epochs_since_detection: int = NEVER
+    epochs_since_penalty: int = NEVER
     current_heat_level: float = 0.0  # How much attention we're drawing
 
     def update_heat(self, detected: bool, penalty: float) -> None:

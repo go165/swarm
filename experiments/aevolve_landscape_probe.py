@@ -21,6 +21,12 @@ welfare at all — because ``p`` is a function of agent *type/count* (0 vs 4
 deceptive: toxicity 0.23 -> 0.37) rather than of the agent's learned actions.
 An evolution engine over either knob set would be optimizing against noise.
 
+Correction (2026-09-13): the attacker flatness came from AdaptiveAdversary
+laying low on every turn, because its detection counter started at "detected
+this epoch" and was never advanced. With that fixed, knob toxicity spread is
+about 0.03. The defender levers are wired but never trigger at this scenario's
+scale; see docs/research/aevolve-flat-landscape.md.
+
 Run:
     python experiments/aevolve_landscape_probe.py            # both probes
     python experiments/aevolve_landscape_probe.py --json     # machine-readable

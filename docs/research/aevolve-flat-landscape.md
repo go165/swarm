@@ -49,7 +49,39 @@ and `4 adaptive_adversary ≈ 4 deceptive`.
 `rho_a/rho_b` move welfare, and the default `one_minus_toxicity` score barely
 reflects even those (spread 0.0045).
 
-## Root cause
+## Correction (2026-09-13): the attacker root cause was a lay-low bug
+
+The root cause below is wrong for the attacker side. `AdversaryMemory`
+initialised `epochs_since_detection = 0`, and `_should_lay_low` treats `< 2`
+as "recently detected". The counter only advances inside
+`update_adversary_outcome`, which nothing in the run loop calls. So the
+adversary took `_act_innocently` on 96 of 96 turns: its strategy code never
+ran, and exploration/learning/heat could not change anything. With the
+counters starting at a "never detected" sentinel, the same probe gives:
+
+| phenotype | toxicity | payoff | welfare |
+|---|---|---|---|
+| passive | 0.4288 | +0.357 | 9.24 |
+| default | 0.4139 | +0.379 | 8.25 |
+| aggressive | 0.4178 | +0.373 | 8.50 |
+| stealth | 0.4444 | +0.333 | 7.86 |
+
+Knob toxicity spread is **0.0304** (was 0.0000). The gate
+`test_attacker_knobs_have_gradient` now passes. Two knobs are still inert:
+`learning_rate` is stored and never read, and `heat_threshold` only matters
+once detections are reported, which still needs the orchestrator to call
+`notify_adversary_detection`.
+
+The defender side is a different problem. The levers are wired: the override
+reaches every lever's config. They just never trigger at this scenario's
+scale. Across 5 seeds with all of them on: 25 audits and 0 penalties (7 of
+215 interactions had `p < audit_threshold_p = 0.5`, none of them audited); 0
+freezes (no interaction has `p < 0.3`, so `freeze_threshold_toxicity = 0.7`
+is unreachable); minimum agent resources stayed at 100, so a stake of 5 never
+binds. `theta` only splits surplus, so it cannot move toxicity or total
+welfare by construction.
+
+## Original root cause (superseded for the attacker side)
 
 `p` (and therefore toxicity, payoff, welfare) is a function of agent
 **type/count**, not of the actions an agent actually takes. The
