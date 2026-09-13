@@ -294,6 +294,51 @@ cells on *requested* rather than *achieved* ρ̄. That run reported structure
 corrected sweep records achieved ρ̄ per cell and flags saturation; 56/189 cells
 cannot reach their requested ρ̄ and must be compared on achieved.
 
+## Findings (2026-09-13, bead `daxc`): our verifiers dropped no true findings, and refuted nothing
+
+Open question 2 asked what fraction of true findings our own verification pass
+discards. We planted 12 unambiguous defects in a small ledger module
+(`experiments/verifier_recall/`; each has a probe that passes on the reference
+and fails on the planted copy) and ran the review-then-adversarially-verify
+shape over it: 3 reviewers with different lenses, deduplicated on exact line,
+then 3 independent verifiers told to refute each finding and to refute when
+uncertain. Output and scores are in `experiments/verifier_recall/results/2026-09-13/`.
+
+| stage | findings | true positives | recall | precision |
+|---|---|---|---|---|
+| review (29 raw, 12 after dedup) | 12 | 11 | 11/12 | 11/12 |
+| verify, any-verifier-drops | 12 | 11 | 11/12 | 11/12 |
+| verify, majority | 12 | 11 | 11/12 | 11/12 |
+| verify, all-must-drop | 12 | 11 | 11/12 | 11/12 |
+
+**Dropped-true-positive rate: 0/11 under all three rules** (one-sided 95%
+upper bound 0.24). Reviewers missed one defect (a zero deposit accepted by
+`< 0` instead of `<= 0`). The one non-matching finding is a second report of
+the `transfer` ordering bug at a different line, not a false claim.
+
+This does not establish that our verifiers are good. **The verifiers refuted
+nothing: 36 of 36 verdicts were "real".** On a fixture with no
+plausible-but-wrong findings, a verifier that approves everything gets the same
+score, so the run measures one side only: verification did not destroy true
+findings when they were obvious and each docstring stated the contract. Lesson
+2's mechanism needs verifiers that sometimes refute. That did not happen here,
+so the aggregation rules could not differ. Three limits on the number:
+
+- **Easy defects.** Every defect contradicts its own docstring. Subtle
+  defects, where the verifier has to reason about intent, are where a true
+  finding would plausibly be argued away.
+- **Batched verifiers.** Each verifier judged all 12 findings in one context
+  instead of one agent per finding, so its verdicts are not independent across
+  findings.
+- **n = 11, one run, one model family** for reviewers and verifiers alike.
+  Open question 1's family-separation concern applies unmeasured.
+
+The follow-up that would make this discriminating is to plant decoy findings
+(well-argued claims about correct code) next to the true ones, and to add
+defects that need intent to see. Then a single fixture measures both the
+dropped-true-positive rate and the false-kept rate, and the three rules can
+separate.
+
 ## Open questions
 
 1. **Verifier/finder family separation in the demo.** Read
@@ -302,8 +347,11 @@ cannot reach their requested ρ̄ and must be compared on achieved.
    example of structural review independence and we should copy it. If no, the
    demo's headline defense result carries an unmeasured correlation.
 2. **Dropped-true-positive rate.** Lesson 2's blind spot applies to us directly.
-   What fraction of true findings does our own verification pass discard? This
-   is measurable with seeded known-true findings and has never been run.
+   What fraction of true findings does our own verification pass discard?
+   **Partly answered 2026-09-13 (bead `daxc`):** 0/11 on unambiguous seeded
+   defects, but the verifiers refuted nothing at all, so the run cannot tell
+   them from a rubber stamp. See the Findings section above; decoy findings are
+   the open half (bead `u96a`).
 3. **Board-off base rate.** Whether Hyperspace (or we) can produce the
    uncoupled attacker propensity that 3/3 is currently standing in for.
    The [schelling-point board replay](../bridges/collusion_wiki.md#schelling-point-board-replay-offline-recreation)
