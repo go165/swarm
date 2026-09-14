@@ -152,6 +152,12 @@ Academic foundations and related publications. SWARM implements the framework de
 
     Attacker vs. defender swarms on the OpenAI-HF incident: correlation degrades both by the same factor, but the attacker pays in visible latency and the defender in silent misses
 
+-   :material-router-network: **[BABEL Model-Router Lessons](babel-model-router-lessons.md)**
+
+    ---
+
+    A one-operator surveillance stack built with Claude and reached through a Chinese model router, set against Anthropic's GTG-14020: many operators behind one account, harm realized off-platform, refusals that yield to a re-prompt
+
 -   :material-file-alert: **[ARA Compiler Pilot Report](ara-pilot-report.md)**
 
     ---
