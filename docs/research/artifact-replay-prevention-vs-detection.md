@@ -74,7 +74,7 @@ outcome is recorded below as observed.
 ## Results (2026-09-13, 10 seeds per arm)
 
 Run: `python scripts/sweep_artifact_replay.py --seeds 10 --out experiments/artifact_replay/results/2026-09-13`.
-Scenario: [`scenarios/artifact_replay.yaml`](../../scenarios/artifact_replay.yaml).
+Scenario: `scenarios/artifact_replay.yaml`.
 Per-run rows are in `sweep.csv`, means and SDs in `summary.json`.
 
 **Calibration disclosed.** The pre-registration allowed tuning on `control` and

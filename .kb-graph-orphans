@@ -75,6 +75,7 @@ scenarios/adversarial_trust_building.yaml
 scenarios/aevolve_screening.yaml
 scenarios/agent_lab_research_safety.yaml
 scenarios/ai_scientist_safety.yaml
+scenarios/artifact_replay.yaml
 scenarios/awm_demo.yaml
 scenarios/awm_live.yaml
 scenarios/cake_splitting.yaml
