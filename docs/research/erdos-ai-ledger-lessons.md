@@ -59,6 +59,19 @@ work, and any retro that reads only DONE rows inherits the survivorship bias
 the wiki warns about. The attempt denominator (assignments issued, claims
 opened) is in the mail table and beads graph; retros should divide by it.
 
+**Correction (bead 81sk, 2026-09-14).** The lesson 2 row says the survivorship
+gap was a missing metric. It wasn't. Because E[p] = α·E[p|accepted] +
+β·E[p|rejected], the gap E[p|accepted] − E[p] is exactly β·Q, which is the
+`selection_credit` term of `toxicity_decomposition`. That term was already in
+`EpochMetrics` and in every `MetricsReporter` output, and it also equals
+`toxicity_rate_all − toxicity_rate`. `SoftMetrics.survivorship_gap` now exists
+under the ledger's name, and `tests/test_metrics.py` pins the identity. What
+is still not built is the part the identity cannot see: an attempt blocked
+before it becomes a `SoftInteraction` (a staking gate or a circuit breaker, for
+example) never enters the denominator. SWARM's gap is measured over recorded
+attempts, so it is exposed to the same bias the wiki warns about, one step
+further upstream.
+
 ## Enforcement status (skill-lint ladder)
 
 - **Substrate-enforced:** lesson 1's practice plane (artifact trigger, applied
@@ -66,8 +79,10 @@ opened) is in the mail table and beads graph; retros should divide by it.
 - **Retro-checked:** lesson 7 (quota-gaming audit), lesson 2's practice plane
   (prereg comparison), lesson 5's dispatch flag (convergent-bet detection in
   `/bv-dispatch` analysis).
-- **Prose-only / not yet built:** lesson 2's model plane (survivorship-gap
-  metric), lesson 4's model plane (verifier-payoff parity scenario), lesson
+- **Test-enforced:** lesson 2's model plane (survivorship gap ≡ selection
+  credit, see the correction above; pre-interaction attempts are still
+  uncounted).
+- **Prose-only / not yet built:** lesson 4's model plane (verifier-payoff parity scenario), lesson
   5's model plane (corroboration-vs-collusion acceptance scenario). Follow-up
   beads filed; see below.
 

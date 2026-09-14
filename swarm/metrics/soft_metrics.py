@@ -230,6 +230,29 @@ class SoftMetrics:
             "reconstruction_error": abs(tox_direct - (baseline - credit)),
         }
 
+    def survivorship_gap(self, interactions: List[SoftInteraction]) -> Optional[float]:
+        """
+        Survivorship gap: E[p | accepted] - E[p over all attempts].
+
+        How much a wins-only ledger overstates quality (the Erdős AI-ledger
+        denominator problem, docs/research/erdos-ai-ledger-lessons.md).
+        Since E[p] = α·E[p|acc] + β·E[p|rej], this is exactly β·Q: the
+        selection_credit of toxicity_decomposition, and equally
+        toxicity_rate_all - toxicity_rate. It is already reported under that
+        name; this method exists so the concept is findable by its own name.
+
+        The identity only holds over the attempts that became interactions.
+        Attempts blocked before an interaction is recorded are invisible here,
+        exactly as in the ledger.
+
+        Returns:
+            The gap, or None when nothing was accepted (no ledger to inflate).
+        """
+        accepted = [i for i in interactions if i.accepted]
+        if not accepted:
+            return None
+        return self.average_quality(accepted) - self.average_quality(interactions)
+
     def plausibility_certificate_gap(
         self, interactions: List[SoftInteraction]
     ) -> Optional[float]:

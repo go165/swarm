@@ -408,6 +408,24 @@ class TestProjectionDiagnostics:
         assert d["baseline_harm"] > 0
         assert d["selection_credit"] > 0  # good selection ⇒ positive credit
 
+    def test_survivorship_gap_is_selection_credit(self):
+        m = SoftMetrics()
+        for batch in (self._mixed(), generate_mixed_batch(), generate_toxic_batch()):
+            gap = m.survivorship_gap(batch)
+            assert gap is not None
+            assert abs(gap - m.toxicity_decomposition(batch)["selection_credit"]) < 1e-9
+            assert abs(gap - (m.toxicity_rate_all(batch) - m.toxicity_rate(batch))) < 1e-9
+        # 0.8 - mean(0.9, 0.7, 0.3, 0.1)
+        assert abs(m.survivorship_gap(self._mixed()) - 0.3) < 1e-9
+
+    def test_survivorship_gap_degenerate(self):
+        m = SoftMetrics()
+        assert m.survivorship_gap([]) is None
+        assert m.survivorship_gap([SoftInteraction(p=0.9, accepted=False)]) is None
+        # everything accepted ⇒ the ledger is the population ⇒ no gap
+        all_acc = [SoftInteraction(p=p, accepted=True) for p in (0.2, 0.8)]
+        assert m.survivorship_gap(all_acc) == 0.0
+
     def test_saturation_in_unit_interval(self):
         s = SoftMetrics().selection_saturation(self._mixed())
         assert 0.0 <= s <= 1.0 + 1e-9
