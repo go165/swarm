@@ -210,3 +210,7 @@ tax, are in
 - Reproduce: `python scripts/sweep_memetic_spread.py --seeds 10` then
   `python scripts/plot_memetic_spread.py <run_dir>`; ranking sweep:
   `--rankings quality,recency,engagement --cadences 0,2`
+
+## See also
+
+- [Artifact replay: prevention vs detection](artifact-replay-prevention-vs-detection.md) (bead `iujo`) tests whether this ordering inverts when prevention is cheap and mechanical rather than destructive.
