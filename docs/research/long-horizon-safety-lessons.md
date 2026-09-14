@@ -422,6 +422,64 @@ verification is defeated by decomposition; only aggregation across the level
 the attacker is exploiting — ultimately across *identities*, made economically
 binding by stake — closes the gap.
 
+## 10. Prevention does not decompose; it just covers less (bead `vwj3`)
+
+§9 ends with every per-unit monitor losing to decomposition. A capability
+precondition checks *authority*, not suspiciousness, so it should not.
+`swarm/governance/capability_precondition.py` refuses a write to any resource
+outside the agent's grant, whatever its proxy label.
+`swarm/redteam/capability_bridge.py` runs one attacker through it and through
+the real `RandomAuditLever`. Settings match §9: audit probability 0.4,
+threshold 0.5, attacker per-step label `p_int`. The attacker splits its
+objective into `k` steps; a fraction `coverage` of them write outside its
+grant, the rest are harmful writes to resources it holds. The audit halts the
+attack at its first penalty, but only after that step has executed. Run:
+`python -m experiments.prevention_detection_frontier`, output in
+`experiments/prevention_detection/results/2026-09-13/`.
+
+**The shapes are as hypothesised.** Per step, audit catch is 0.39 for
+`p_int` ≤ 0.49 and **exactly 0.000** from 0.50 up. Precondition refusal is
+**1.000 at every `p_int`**. Neither is a surprise; both follow from what each
+lever reads.
+
+**The frontier is the useful part.** Harm realized is the fraction of 20
+steps that execute:
+
+| attacker | coverage 0 | 0.25 | 0.75 | 1.0 |
+|---|---|---|---|---|
+| dirty (`p_int` < 0.5), audit | 0.13 | 0.13 | 0.13 | 0.13 |
+| dirty, precondition | 1.00 | 0.75 | 0.25 | 0.00 |
+| clean (`p_int` ≥ 0.5), audit | 1.00 | 1.00 | 1.00 | 1.00 |
+| clean, precondition | 1.00 | 0.75 | 0.25 | 0.00 |
+
+- **Against a clean attacker the precondition wins at any coverage above 0.**
+  The audit stops nothing.
+- **Against a dirty attacker the audit usually wins,** because one catch halts
+  the whole remaining sequence while the precondition only removes the
+  out-of-grant steps. The break-even coverage depends on attack length:
+
+  | k | 1 | 2 | 3 | 5 | 10 | 20 | 50 |
+  |---|---|---|---|---|---|---|---|
+  | harm under audit | 1.00 | 0.80 | 0.65 | 0.46 | 0.25 | 0.13 | 0.05 |
+  | precondition wins if coverage > | 0.00 | 0.20 | 0.35 | 0.54 | 0.75 | 0.87 | 0.95 |
+
+  A one-step attack always completes under a post-hoc audit, so short,
+  concentrated attacks favour the precondition; long ones favour detection,
+  *provided the steps stay dirty*.
+- **Both together are never worse than either** (tested).
+- **Buying detection back against a clean attacker** means raising the
+  threshold to 0.85, which catches `p_int` = 0.8 at 0.39 per step but flags
+  35.6% of honest work (proxy `p` ≈ 0.7), as in §9. The precondition's honest
+  false-positive rate is 0 **for honest agents that stay inside their grant**.
+  A misspecified grant would refuse honest work, and that is not modelled.
+
+**Budget rule.** Against an attacker that can keep steps clean, detection
+spend is wasted and the precondition's coverage is all the protection there
+is. Against one that cannot, detection wins unless the attack is short or
+mostly out of grant. The standing caveat decides most of SWARM's cases:
+coverage is the fraction of the attack expressible as a capability boundary,
+and a harmful edit to a file the agent may edit has coverage 0.
+
 ## Iterative-deployment framing
 
 OpenAI's meta-lesson — no fixed eval anticipates every behavior, so pair
