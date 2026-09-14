@@ -134,6 +134,12 @@ change to a file you are authorized to edit). The interesting quantity is the
 robustness; detection has broad coverage and cliff-shaped robustness. SWARM
 currently models only the detection side.
 
+**Tested (bead `vwj3`, 2026-09-13):** the shapes hold, flat refusal against
+a cliff at the audit threshold. The frontier is narrower than "prevention is
+robust": against attackers who cannot keep steps clean, a halting audit beats
+a precondition unless coverage exceeds `1 − harm_audit(k)`, which is 0.87 at
+k = 20. See [long-horizon-safety-lessons.md §10](long-horizon-safety-lessons.md).
+
 ## Mapping to SWARM constructs
 
 | Shepherd mechanism | SWARM analogue | Gap |
