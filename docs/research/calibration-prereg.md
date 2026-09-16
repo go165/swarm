@@ -219,3 +219,21 @@ judge pipeline and are run in sequence.
   with governance disabled), an emergent effect that does not affect the
   criteria; expected per-cluster n≥500 was met only for four of six
   clusters, and every bin still clears its convergence bound with margin.
+
+- **2026-09-16 — Posterior inference over proxy parameters (out of scope for
+  this registration; recorded here because it bears on Finding 4):**
+  [hmc-proxy-posterior.md](hmc-proxy-posterior.md). The `beta_swarm` proxy is
+  read as a likelihood and its six parameters sampled with dynamic HMC, instead
+  of hand-set with one knob fit by a 1-D grid. Two findings the grid could not
+  have surfaced: `base_concentration` and `evidence_scale` correlate at
+  r ≈ −0.77 (so per-axis search cannot reach the joint optimum by construction),
+  and the posterior puts almost all observable weight on counterparty
+  engagement against a hand-set 0.2 — a property of the `beta_swarm/agents.py`
+  emission models, not an established fact about real systems. A third,
+  predicted finding **failed**: tail-mass credible intervals proved too narrow
+  to flip any governance call, so that argument is withdrawn pending a
+  small-sample re-run. Does **not** overturn the
+  [deviation analysis](calibration-arm-a-deviation-analysis.md)'s Finding 4:
+  that concerns a per-interaction latent from a single realized outcome, which
+  stays under-determined; this estimates global parameters pooled across N
+  interactions, which is well-posed.
