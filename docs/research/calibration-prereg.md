@@ -237,3 +237,11 @@ judge pipeline and are run in sequence.
   that concerns a per-interaction latent from a single realized outcome, which
   stays under-determined; this estimates global parameters pooled across N
   interactions, which is well-posed.
+
+- **2026-09-17 — `beta_swarm` moved out of this repo.** The code the entry above
+  refers to now lives in
+  [`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm),
+  vendored as the `beta-swarm/` submodule, so paths like `beta_swarm/agents.py`
+  are relative to that repo. Nothing about the registered design or the readouts
+  changes; this is a location note so the references stay followable. Epic `fcmy`
+  stays in this repo's bead tracker.

@@ -2,7 +2,11 @@
 
 **Status:** prototype complete, result positive, adoption not yet decided.
 **Beads:** `distributional-agi-safety-fcmy` (epic), `.1`–`.4`.
-**Code:** `beta_swarm/inference/`, `scripts/hmc_vs_grid_evidence_scale.py`, `tests/test_hmc.py`.
+**Code:** now in [`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm)
+(vendored here as the `beta-swarm/` submodule) — `beta_swarm/inference/`,
+`scripts/hmc_vs_grid_evidence_scale.py`, `tests/test_hmc.py`. Paths in this note are
+relative to that repo's root. It was written while `beta_swarm/` still lived in this
+repo, at commit `5ab1a982`; the split-out is `beta-swarm` commit `8005468`.
 **Runs:** `runs/20260916T2025*_hmc_vs_grid_seed{0,1,2}/`.
 **Reference:** Betancourt, *A Conceptual Introduction to Hamiltonian Monte Carlo*, arXiv:1701.02434.
 
@@ -112,9 +116,9 @@ grid could not have surfaced, because it never varies the weights.
 
 The grid's pick is worse on PIT deviation — *its own selection criterion* — by
 57%. It is sharper, having bought that sharpness with calibration it could not
-afford. Note that the grid's best-PIT pick (scale 4.5, PIT 0.335) is still worse
-than the posterior mean, so this is not an artifact of the selection rule used
-here.
+afford. Note that the grid's best-PIT pick (seed 0, n=3000: scale 5.0, PIT
+0.333) is still worse than the posterior mean, so this is not an artifact of the
+selection rule used here.
 
 Also note the comparison is not strictly apples-to-apples: the grid selects on
 PIT, HMC targets the posterior. Both derive from proper scoring rules, but the
@@ -180,3 +184,22 @@ Open before adoption (bead `.4`):
 4. The `w_engagement ≈ 0.99` result must be reproduced against a generative
    model that was not written by us before it informs any change to the proxy's
    defaults. Right now it is a statement about `agents.py`.
+
+## Addendum, 2026-09-17: the code moved
+
+`beta_swarm` was split out of this repo into
+[`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm)
+and vendored back as the `beta-swarm/` submodule.
+
+Worth recording because it nearly cost work. `beta_swarm/` had originally been
+folded *in* from a standalone repo (`8e2a3984`), and both copies then kept
+moving: this repo gained the PR-review fixes and the whole HMC package, while the
+standalone gained a `ContainmentEscaper` adversary that never landed here. Ten of
+fourteen shared files differed and **neither side was a superset**. Wiring the
+submodule first would have deleted the HMC work from the working tree, since a
+submodule replaces the directory with a checkout of the remote.
+
+The order that worked: port the missing half into this repo (`98557793`), making
+it the superset; then sync outward and push (`beta-swarm` `8005468`); only then
+replace the directory with the submodule. The 161 tests pass identically on both
+sides, which is what confirms nothing was dropped in either direction.

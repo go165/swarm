@@ -60,8 +60,11 @@ runtime = [
     # unconditionally and the agentgit attest loop drives it as a subprocess.
     "rich>=13.0",
 ]
-# The distributional generalization (beta_swarm/) needs scipy for the Beta
-# distribution math; core `swarm` does not, so it stays an extra.
+# The distributional generalization lives in its own repo, vendored as the
+# `beta-swarm/` submodule (swarm-ai-research/beta-swarm). Install it editable
+# to make `import beta_swarm` resolve:
+#     git submodule update --init && python -m pip install -e beta-swarm/
+# This extra keeps only the scipy floor, since core `swarm` does not need it.
 beta = [
     "scipy>=1.10",
 ]
@@ -179,7 +182,7 @@ agentgit = "swarm.agentgit.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["swarm*", "swarm_gym*", "beta_swarm*"]
+include = ["swarm*", "swarm_gym*"]
 
 [tool.setuptools.package-data]
 swarm = ["py.typed"]
@@ -242,8 +245,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# beta_swarm's visual-tour notebook uses idiomatic matplotlib one-liners.
-"examples/beta/*.ipynb" = ["E702", "B905"]
 
 [tool.coverage.run]
 source = ["swarm"]

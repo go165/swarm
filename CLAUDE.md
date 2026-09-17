@@ -35,6 +35,33 @@ Large/supplementary files live in a separate repo: [`swarm-ai-research/swarm-art
 
 These directories are gitignored in main. Local `runs/` and `docs/papers/` are still used as working directories — they just aren't committed here.
 
+### beta-swarm submodule
+
+The distributional generalization (a full `Beta(alpha, beta)` belief over a
+continuous outcome, rather than a scalar `p`) lives in its own repo:
+[`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm),
+vendored here as the **`beta-swarm/`** submodule. It has no imports to or from
+`swarm/` in either direction — that is why it could be split out.
+
+```bash
+git submodule update --init          # fetch it
+python -m pip install -e beta-swarm/ # make `import beta_swarm` resolve
+python -m pytest beta-swarm/tests/   # its 161 tests run separately
+```
+
+This repo's own `pytest tests/` does **not** cover it, and CI does not check out
+the submodule. Changes to `beta_swarm` code belong in that repo, not here;
+committing here only moves the submodule pointer.
+
+It was folded into this repo in `8e2a3984` and split back out after the two
+copies diverged in both directions (`98557793` ported the missing half back
+before the split, so nothing was lost). If you find yourself re-vendoring it,
+read `docs/research/hmc-proxy-posterior.md` first — the divergence cost a
+reconciliation.
+
+Epic `fcmy` tracks its posterior-inference work and **stays in this repo's bead
+tracker** even though the code now lives elsewhere.
+
 ### Run artifacts
 
 Prefer writing experiment outputs to a self-contained run folder:
