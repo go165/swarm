@@ -62,6 +62,27 @@ reconciliation.
 Epic `fcmy` tracks its posterior-inference work and **stays in this repo's bead
 tracker** even though the code now lives elsewhere.
 
+#### In session worktrees: `beta-swarm/` is empty on purpose
+
+All sessions share **one** Python interpreter — there are no per-session venvs —
+so an editable install is a single global path entry in site-packages. If each
+worktree ran `pip install -e beta-swarm/`, whichever session installed last would
+silently own `import beta_swarm` for all of them, and every other session would
+be importing a checkout it is not looking at.
+
+So the main checkout owns the install. `scripts/claude-tmux.sh` calls
+`ensure_beta_swarm` once before creating any worktree, and deliberately does
+**not** pass `--recurse-submodules` to `git worktree add`. In a session worktree
+`beta-swarm/` stays empty (with an `EMPTY-BY-DESIGN.md` marker saying why), while
+`import beta_swarm` still resolves — to `$MAIN_REPO_ROOT/beta-swarm`.
+
+The consequence to keep in mind: what you import in a worktree is the **main
+checkout's** submodule commit, not whatever pointer your branch happens to
+record. That is fine for reading and for running `swarm` code that touches it.
+It is not fine for editing. **To change `beta_swarm` code, clone that repo**
+(`gh repo clone swarm-ai-research/beta-swarm`) and work there; a commit in this
+repo only moves the pointer.
+
 ### Run artifacts
 
 Prefer writing experiment outputs to a self-contained run folder:

@@ -29,6 +29,14 @@ dependencies = [
     "pandas>=2.1",
     "pyyaml>=6.0",
     "pynacl>=1.5",
+    # swarm/detection/stats.py imports `from scipy import stats` at module level,
+    # so detection is unimportable without it. It was declared only in the
+    # `analysis` and `beta` extras until bead cqis; CI never caught that because
+    # it installs `analysis`. Audited 2026-09-17 with the extras blocked:
+    # swarm.detection.stats is the ONLY core module that fails that way —
+    # matplotlib, fastapi, web3, streamlit and the rest are genuinely optional
+    # subsystems and stay in extras. The `core-import` CI job pins this.
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]

@@ -505,7 +505,57 @@ if [ -f "$CLAIM_MARKER_FILE" ] && command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
-# ── 7. Tests ──
+# ── 7. beta-swarm submodule integrity ──
+# beta_swarm was folded into this repo, drifted for eight weeks against its
+# standalone copy (10 of 14 shared files differed, neither a superset), and was
+# split back out. These two guards keep that from recurring.
+# Set SWARM_BLOCK_CONCURRENT_COMMITS=0 to downgrade both to warnings.
+_SUB=beta-swarm
+_sub_block() {
+    if [ "${SWARM_BLOCK_CONCURRENT_COMMITS:-1}" != "0" ]; then
+        echo "[swarm pre-commit] BLOCKED: $1"
+        echo "  Bypass once with: SWARM_BLOCK_CONCURRENT_COMMITS=0 git commit ..."
+        exit 1
+    fi
+    echo "[swarm pre-commit] WARNING: $1"
+}
+
+# 7a. Re-vendoring guard. A top-level beta_swarm/ directory here is the mistake
+# that created the two-copies situation in the first place.
+if git diff --cached --name-only --diff-filter=A | grep -q '^beta_swarm/'; then
+    _sub_block "staged files under a top-level beta_swarm/ — that package now
+  lives in swarm-ai-research/beta-swarm, vendored as the $_SUB/ submodule.
+  Re-vendoring it recreates the divergence the split just cleaned up.
+  Work in a clone of that repo instead; see CLAUDE.md 'beta-swarm submodule'."
+fi
+
+# 7b. Pointer reachability. Committing a pointer to a commit that was never
+# pushed leaves every other checkout unable to `git submodule update`.
+if git diff --cached --name-only | grep -qx "$_SUB" && [ -d "$_SUB/.git" ] || \
+   { git diff --cached --name-only | grep -qx "$_SUB" && [ -f "$_SUB/.git" ]; }; then
+    _SHA=$(git diff --cached -- "$_SUB" | awk '/^\+Subproject commit/ {print $3}')
+    if [ -n "${_SHA:-}" ]; then
+        if ! git -C "$_SUB" cat-file -e "$_SHA^{commit}" 2>/dev/null; then
+            _sub_block "$_SUB pointer $_SHA does not exist in the submodule."
+        elif ! git -C "$_SUB" branch -r --contains "$_SHA" 2>/dev/null | grep -q .; then
+            _sub_block "$_SUB pointer ${_SHA:0:8} is not on any remote branch —
+  push the submodule first, or everyone else gets
+  'fatal: remote error: upload-pack: not our ref'.
+      git -C $_SUB push origin HEAD:main"
+        else
+            # Reachable, but is it stale? Warn only; a deliberate older pointer
+            # is legitimate.
+            if git -C "$_SUB" fetch origin main --quiet 2>/dev/null; then
+                _BEHIND=$(git -C "$_SUB" rev-list --count "$_SHA"..origin/main 2>/dev/null || echo 0)
+                if [ "${_BEHIND:-0}" -gt 0 ]; then
+                    echo "[swarm pre-commit] note: $_SUB pointer is $_BEHIND commit(s) behind origin/main."
+                fi
+            fi
+        fi
+    fi
+fi
+
+# ── 8. Tests ──
 # Tests run in pre-push (via `make ci`), NOT pre-commit.
 # This keeps commits fast (~2s) and avoids HEAD race conditions
 # when parallel sessions share a worktree.

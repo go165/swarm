@@ -17,6 +17,52 @@ jobs:
       - run: python -m pip install ruff
       - run: ruff check swarm/ tests/
 
+  # Every other job installs `.[dev,runtime,api,analysis,gamescape]`, so a
+  # runtime import declared only in an extra looks fine forever. That is how
+  # scipy — imported at module level by swarm/detection/stats.py — sat in the
+  # `analysis` extra unnoticed until bead cqis: `pip install swarm-safety`
+  # produced a package whose detection module would not import.
+  # This job installs the bare package and imports the core surface.
+  core-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install with NO extras
+        run: python -m pip install -e .
+      - name: Core modules must import
+        run: |
+          python - <<'PY'
+          import importlib
+          CORE = [
+              "swarm",
+              "swarm.__main__",
+              "swarm.core.proxy",
+              "swarm.core.payoff",
+              "swarm.metrics.soft_metrics",
+              "swarm.metrics.reporters",
+              "swarm.detection.stats",
+              "swarm.logging.event_log",
+          ]
+          failed = []
+          for m in CORE:
+              try:
+                  importlib.import_module(m)
+              except Exception as e:
+                  failed.append(f"{m}: {type(e).__name__}: {e}")
+          if failed:
+              print("Core modules that do not import without extras:")
+              for f in failed:
+                  print("  " + f)
+              print()
+              print("Either add the missing package to [project] dependencies, or")
+              print("make the import lazy if the module is genuinely optional.")
+              raise SystemExit(1)
+          print(f"all {len(CORE)} core modules import with no extras installed")
+          PY
+
   # The Next.js viz app had no CI at all: a red lint, type, or build error
   # (e.g. the use-media-query set-state-in-effect breakage) reached main
   # unnoticed. Warnings don't fail the job; errors do.
@@ -243,7 +289,7 @@ jobs:
   # Add "quality-gate" as a required check in GitHub branch protection.
   quality-gate:
     if: always()
-    needs: [lint, invariants, kb-graph-check, type-check, test, agentgit-gate, render-verify]
+    needs: [lint, core-import, invariants, kb-graph-check, type-check, test, agentgit-gate, render-verify]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
