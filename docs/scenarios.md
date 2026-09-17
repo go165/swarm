@@ -71,6 +71,22 @@ metrics = orchestrator.run()
 
 ## Scenario Comparison
 
+### Controlled-clock deadline-pressure pilot
+
+[`scenarios/deadline_pressure.yaml`](https://github.com/swarm-ai-research/swarm/blob/main/scenarios/deadline_pressure.yaml)
+configures paired local-model trials of delegation, direct source verification,
+and published answers under equal shared generated-token allowances. It uses a
+simulated clock and a specialized runner:
+
+```bash
+python -m experiments.deadline_pressure --smoke --output runs/deadline_pressure_smoke
+python -m experiments.deadline_pressure --output runs/deadline_pressure_live
+```
+
+The live command requires local Ollama with the configured model available.
+See the [experiment rationale and pilot results](https://github.com/swarm-ai-research/swarm/blob/main/experiments/deadline_pressure.md)
+for limitations. This config is not an input to `python -m swarm run`.
+
 | Metric | Baseline | Status Game | Strict Governance |
 |--------|----------|-------------|-------------------|
 | **Governance** | None | Moderate | Heavy |
