@@ -64,7 +64,13 @@ runtime = [
 # `beta-swarm/` submodule (swarm-ai-research/beta-swarm). Install it editable
 # to make `import beta_swarm` resolve:
 #     git submodule update --init && python -m pip install -e beta-swarm/
-# This extra keeps only the scipy floor, since core `swarm` does not need it.
+# This extra keeps a scipy floor for parity with that repo's own pin.
+# NOTE: the claim this comment used to make -- that core `swarm` does not
+# need scipy -- is false: swarm/detection/stats.py, swarm/analysis/*.py,
+# swarm/research/agents.py and swarm/scripts/analyze.py all import it. It is
+# declared only in the `analysis` and `beta` extras, so a bare
+# `pip install swarm-safety` cannot import swarm.detection.stats. CI passes
+# only because it installs `analysis`. Pre-existing; tracked separately.
 beta = [
     "scipy>=1.10",
 ]
