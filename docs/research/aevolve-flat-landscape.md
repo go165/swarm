@@ -72,6 +72,13 @@ Knob toxicity spread is **0.0304** (was 0.0000). The gate
 once detections are reported, which still needs the orchestrator to call
 `notify_adversary_detection`.
 
+*Update (2026-09-14, bead `ehw8`):* both are now live. The finalizer reports
+every freeze and every negative reputation or resource delta to the agent it
+hits (`observe_governance`). Interaction payoffs train the strategy bandit,
+heat decays once per epoch, and `learning_rate` scales the post-detection
+threshold shrink; its default of 0.1 reproduces the old 0.95. The probe tests
+still pass. The table above predates the change and was not re-run.
+
 The defender side is a different problem. The levers are wired: the override
 reaches every lever's config. They just never trigger at this scenario's
 scale. Across 5 seeds with all of them on: 25 audits and 0 penalties (7 of
@@ -80,6 +87,11 @@ freezes (no interaction has `p < 0.3`, so `freeze_threshold_toxicity = 0.7`
 is unreachable); minimum agent resources stayed at 100, so a stake of 5 never
 binds. `theta` only splits surplus, so it cannot move toxicity or total
 welfare by construction.
+
+The stake is the one that generalizes beyond this scenario: payoffs never
+reach `resources`, so the gate is a constant everywhere, not only here.
+[What should a participation stake be measured against?](stake-basis.md)
+(bead `p70u`) measures the two candidate fixes.
 
 ## Defender fix (2026-09-13, bead `sw83`): whitelist the thresholds, score welfare
 
