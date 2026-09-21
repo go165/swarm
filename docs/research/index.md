@@ -110,6 +110,12 @@ Academic foundations and related publications. SWARM implements the framework de
 
     Ecosystem governance lessons from Tao's AI-contributions ledger: verification bottleneck, denominator problem, corroboration vs. collusion
 
+-   :material-map-search: **[AI Village → SWARM: Mapping Design](ai-village-mapping-design.md)**
+
+    ---
+
+    Design gate before bridging AI Digest's 17-month agent corpus: which regime, how to manufacture a dyad the data never recorded, why no admissible task-progress observable exists, and the outcome-variable problem that decides what the calibration can claim
+
 -   :material-book-open-variant: **[Classic Essays as Swarm Mechanisms](classic-essays-swarm-lessons.md)**
 
     ---
