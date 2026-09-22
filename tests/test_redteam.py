@@ -83,7 +83,8 @@ class TestAdversaryMemory:
         """Test initial memory state."""
         memory = AdversaryMemory()
         assert memory.current_heat_level == 0.0
-        assert memory.epochs_since_detection == 0
+        # Never detected is not the same as detected this epoch.
+        assert memory.epochs_since_detection >= 2
 
     def test_heat_update_on_detection(self):
         """Test heat increases on detection."""
@@ -1210,3 +1211,394 @@ class TestGovernanceEffectivenessSerialization:
         assert data["recall"] == 0.0
         assert data["f1_score"] == 0.0
         assert data["accuracy"] == 0.0
+
+
+class TestAdversaryActionAttribution:
+    """Regression for beads s2t2: every action must carry the agent_id."""
+
+    def test_all_strategy_paths_set_agent_id(self):
+        agent = AdaptiveAdversary(agent_id="adaptive_1")
+        obs = Observation(
+            current_epoch=1,
+            current_step=1,
+            visible_agents=[
+                {"agent_id": "honest_1", "agent_type": "honest", "reputation": 5.0},
+                {"agent_id": "adv_2", "agent_type": "adversary", "reputation": 1.0},
+            ],
+            visible_posts=[
+                {"post_id": "p1", "votes": 3},
+            ],
+        )
+        handlers = [
+            agent._act_innocently,
+            agent._act_reputation_farming,
+            agent._act_low_profile,
+        ]
+        # Drive each handler across many RNG draws so every internal branch
+        # (post / vote / propose / noop) is exercised.
+        for handler in handlers:
+            for _ in range(30):
+                action = handler(obs)
+                assert action.agent_id == "adaptive_1", (
+                    f"{handler.__name__} produced an action without attribution"
+                )
+
+    def test_act_sets_agent_id(self):
+        agent = AdaptiveAdversary(agent_id="adaptive_1")
+        obs = Observation(
+            current_epoch=1,
+            current_step=1,
+            visible_agents=[],
+            visible_posts=[],
+        )
+        for _ in range(20):
+            assert agent.act(obs).agent_id == "adaptive_1"
+
+
+class TestAdversaryProposalRouting:
+    """Regression for beads fkn9: proposals must route via counterparty_id.
+
+    The proposal handler (core_interaction_handler._handle_propose) reads
+    action.counterparty_id exclusively; adaptive_adversary used to put the
+    target in target_id, so every adversary proposal was a silent no-op —
+    with a network graph the empty counterparty failed has_edge, without
+    one the proposal was addressed to nobody. Either way the red-team
+    agent never actually attacked anyone.
+    """
+
+    def _obs_with_targets(self):
+        return Observation(
+            current_epoch=3,
+            current_step=1,
+            visible_agents=[
+                {"agent_id": "honest_1", "agent_type": "honest", "reputation": 8.0},
+                {"agent_id": "adv_2", "agent_type": "adversary", "reputation": 1.0},
+            ],
+            visible_posts=[{"post_id": "p1", "votes": 2}],
+        )
+
+    def _collect_proposals(self, agent, obs, attempts=200):
+        # A fresh agent lays low in act(); drive the strategy handlers that
+        # emit proposals directly (same approach as the attribution tests).
+        handlers = [
+            agent._act_reputation_farming,
+            agent._act_opportunistic,
+            agent._act_mimicry,
+        ]
+        out = []
+        for handler in handlers:
+            for _ in range(attempts):
+                action = handler(obs)
+                if action.action_type == ActionType.PROPOSE_INTERACTION:
+                    out.append(action)
+        return out
+
+    def test_every_emitted_proposal_carries_counterparty(self):
+        agent = AdaptiveAdversary(agent_id="adaptive_1")
+        obs = self._obs_with_targets()
+        proposals = self._collect_proposals(agent, obs)
+        assert proposals, "no proposal path exercised — fixture too narrow"
+        for action in proposals:
+            assert action.counterparty_id, (
+                "proposal without counterparty_id — unroutable"
+            )
+            assert action.counterparty_id in {"honest_1", "adv_2"}
+
+    def test_proposal_reaches_handler_and_targets_counterparty(self):
+        from swarm.core.core_interaction_handler import CoreInteractionHandler
+        from swarm.env.state import EnvState
+
+        agent = AdaptiveAdversary(agent_id="adaptive_1")
+        obs = self._obs_with_targets()
+        proposals = self._collect_proposals(agent, obs, attempts=50)
+        assert proposals
+        action = proposals[0]
+
+        class _NullBus:
+            def emit(self, event):
+                pass
+
+        handler = CoreInteractionHandler(
+            finalizer=None,  # unused on the propose path
+            event_bus=_NullBus(),
+        )
+        state = EnvState()
+        result = handler.handle_action(action, state)
+        assert result.success
+        pending = state.get_proposals_for_agent(action.counterparty_id)
+        assert len(pending) == 1
+        assert pending[0].initiator_id == "adaptive_1"
+
+
+class TestOutOfBandChannel:
+    """The collusion.wiki exhibit (bead 7y0p): coordination off-instrument."""
+
+    def _evasion(self, **gov):
+        ev = RedTeamEvaluator(governance_config=gov)
+        scenario = AttackLibrary.out_of_band_channel()
+        result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+        # evasion_rate is deterministic (0.7 * success probability), unlike
+        # attack_succeeded, so compare it across governance configs.
+        return ev._simulate_attack_outcome(scenario, result).evasion_rate
+
+    def test_in_library(self):
+        ids = [a.attack_id for a in AttackLibrary.get_all_attacks()]
+        assert "out_of_band_channel" in ids
+        attack = AttackLibrary.out_of_band_channel()
+        assert attack.category == AttackCategory.COORDINATION
+        assert attack.adversary_config["channel_visible_to_proxy"] is False
+        assert attack.adversary_config["evasion_prefix"] == "ZZZ"
+        assert "volume_monitor" in attack.targeted_levers
+
+    def test_collusion_detection_does_not_help(self):
+        # Replay finding: pairwise/structural detection saturates on a hub page.
+        assert self._evasion() == self._evasion(collusion_detection_enabled=True)
+
+    def test_volume_monitor_reduces_and_allowlist_prevents(self):
+        none = self._evasion()
+        volume = self._evasion(volume_monitor_enabled=True)
+        allowlist = self._evasion(egress_allowlist_enabled=True)
+        assert allowlist < volume < none
+
+    def test_recommends_volume_monitor_when_attack_succeeds(self):
+        ev = RedTeamEvaluator(governance_config={})
+        scenario = AttackLibrary.out_of_band_channel()
+        result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+        result.attack_succeeded = True
+        ev.attack_results = [result]
+        recs = ev._generate_recommendations(GovernanceRobustness(governance_config={}))
+        assert any("volume/rate monitor" in r for r in recs)
+
+    def test_population_monitor_is_host_count_invariant(self):
+        # vv3j.8: the per-host volume monitor weakens as the swarm gains hosts
+        # to relocate across; the population monitor does not.
+        def evasion(n_hosts, **gov):
+            ev = RedTeamEvaluator(governance_config=gov)
+            scenario = AttackLibrary.out_of_band_channel()
+            scenario.adversary_config["n_hosts"] = n_hosts
+            result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+            return ev._simulate_attack_outcome(scenario, result).evasion_rate
+
+        one = evasion(1, volume_monitor_enabled=True)
+        four = evasion(4, volume_monitor_enabled=True)
+        eight = evasion(8, volume_monitor_enabled=True)
+        assert one < four < eight
+        pop = [evasion(n, substrate_population_monitor_enabled=True) for n in (1, 4, 8)]
+        assert pop[0] == pop[1] == pop[2] == one
+
+    def test_recommends_population_monitor_when_hosts_are_many(self):
+        ev = RedTeamEvaluator(governance_config={"volume_monitor_enabled": True})
+        scenario = AttackLibrary.out_of_band_channel()
+        result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+        result.attack_succeeded = True
+        ev.attack_results = [result]
+        recs = ev._generate_recommendations(
+            GovernanceRobustness(governance_config=ev.governance_config)
+        )
+        assert any("population of hosts" in r for r in recs)
+
+
+class TestProvenanceReplay:
+    """Artifact-level laundering (bead 0jxz), calibrated on the iujo sweep."""
+
+    def _evasion(self, **gov):
+        ev = RedTeamEvaluator(governance_config=gov)
+        scenario = AttackLibrary.provenance_replay()
+        result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+        return ev._simulate_attack_outcome(scenario, result).evasion_rate
+
+    def test_in_library_next_to_information_laundering(self):
+        attack = AttackLibrary.provenance_replay()
+        assert "provenance_replay" in [
+            a.attack_id for a in AttackLibrary.get_all_attacks()
+        ]
+        assert attack.category == AttackCategory.INFORMATION
+        assert attack.difficulty == AttackDifficulty.EXPERT
+        assert attack.targeted_levers == [
+            "artifact_context_binding",
+            "artifact_replay_detection",
+            "collusion_detection",
+            "circuit_breaker",
+        ]
+        assert attack in AttackLibrary.get_attacks_targeting_lever(
+            "artifact_context_binding"
+        )
+
+    def test_binding_prevents(self):
+        assert (
+            self._evasion(artifact_context_binding_enabled=True) < 0.1 * self._evasion()
+        )
+
+    def test_detection_alone_punishes_without_selecting(self):
+        # iujo: replays accepted 241.8/242.2 with or without the detector.
+        assert self._evasion() == self._evasion(artifact_replay_detection_enabled=True)
+
+    def test_detection_reaching_a_freeze_reduces(self):
+        none = self._evasion()
+        freeze = self._evasion(
+            artifact_replay_detection_enabled=True, circuit_breaker_enabled=True
+        )
+        binding = self._evasion(artifact_context_binding_enabled=True)
+        assert binding < freeze < none
+
+    def test_collusion_detection_and_breaker_alone_do_not_help(self):
+        none = self._evasion()
+        assert none == self._evasion(collusion_detection_enabled=True)
+        assert none == self._evasion(circuit_breaker_enabled=True)
+
+    def test_full_evaluation_reports_rates(self):
+        ev = RedTeamEvaluator(governance_config={})
+        report = ev.evaluate(orchestrator_factory=lambda c: None, epochs_per_attack=5)
+        (result,) = [
+            r for r in report.attack_results if r.attack_id == "provenance_replay"
+        ]
+        assert result.evasion_rate > 0
+        assert result.detection_latency > 0
+
+    def test_recommends_binding_when_attack_succeeds(self):
+        ev = RedTeamEvaluator(
+            governance_config={"artifact_replay_detection_enabled": True}
+        )
+        scenario = AttackLibrary.provenance_replay()
+        result = AttackResult(attack_id=scenario.attack_id, scenario=scenario)
+        result.attack_succeeded = True
+        ev.attack_results = [result]
+        recs = ev._generate_recommendations(
+            GovernanceRobustness(governance_config=ev.governance_config)
+        )
+        assert any("Bind artifacts to their producer" in r for r in recs)
+
+
+class TestAdversaryDetectionFeedback:
+    """Governance feedback reaches AdaptiveAdversary in the run loop (beads-ehw8)."""
+
+    def _finalizer(self, agents):
+        from swarm.core.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator()
+        for agent in agents:
+            orchestrator.register_agent(agent)
+        return orchestrator._finalizer
+
+    def test_freeze_is_a_detection(self):
+        from swarm.governance.engine import GovernanceEffect
+
+        adversary = AdaptiveAdversary("adv")
+        finalizer = self._finalizer([adversary])
+        finalizer.apply_governance_effect(GovernanceEffect(agents_to_freeze={"adv"}))
+
+        perf = adversary.strategy_performance[adversary.current_strategy]
+        assert perf.detected == 1
+        assert adversary.memory.recent_detections == [True]
+        assert adversary.memory.current_heat_level > 0
+
+    def test_negative_deltas_are_penalties_positive_are_not(self):
+        from swarm.agents.honest import HonestAgent
+        from swarm.governance.engine import GovernanceEffect
+
+        adversary = AdaptiveAdversary("adv")
+        other = AdaptiveAdversary("other")
+        finalizer = self._finalizer([adversary, other, HonestAgent("h")])
+        finalizer.apply_governance_effect(
+            GovernanceEffect(
+                reputation_deltas={"adv": -1.5, "other": 0.5, "h": -2.0},
+                resource_deltas={"adv": -0.5},
+            )
+        )
+
+        assert adversary.memory.recent_penalties == [2.0]
+        assert other.memory.recent_penalties == []
+
+    def test_empty_effect_notifies_nobody(self):
+        from swarm.governance.engine import GovernanceEffect
+
+        adversary = AdaptiveAdversary("adv")
+        self._finalizer([adversary]).apply_governance_effect(GovernanceEffect())
+        assert adversary.memory.recent_detections == []
+
+    def test_notify_after_completed_interaction_does_not_raise(self):
+        # The inspector used to read payoff_initiator off SoftInteraction,
+        # which has no such field, once any interaction had completed.
+        from swarm.core.orchestrator import Orchestrator, OrchestratorConfig
+
+        orchestrator = Orchestrator(OrchestratorConfig(n_epochs=1, steps_per_epoch=1))
+        adversary = AdaptiveAdversary("adv")
+        orchestrator.register_agent(adversary)
+        from swarm.models.interaction import SoftInteraction
+
+        orchestrator.state.completed_interactions.append(
+            SoftInteraction(initiator="adv", counterparty="x")
+        )
+        orchestrator.notify_adversary_detection("adv", penalty=1.0, detected=True)
+        assert adversary.memory.recent_penalties == [1.0]
+
+    def test_outcomes_train_the_bandit(self):
+        from swarm.models.interaction import SoftInteraction
+
+        adversary = AdaptiveAdversary("adv")
+        adversary.current_strategy = AttackStrategy.MIMICRY
+        adversary.update_from_outcome(
+            SoftInteraction(initiator="adv", counterparty="x"), payoff=3.0
+        )
+        perf = adversary.strategy_performance[AttackStrategy.MIMICRY]
+        assert (perf.attempts, perf.successes, perf.total_payoff) == (1, 1, 3.0)
+
+    def test_learning_rate_scales_threshold_adaptation(self):
+        default = AdaptiveAdversary("a")
+        fast = AdaptiveAdversary("b", learning_rate=0.4)
+        start = default.memory.estimated_toxicity_threshold
+        default.observe_governance(penalty=0.0, detected=True)
+        fast.observe_governance(penalty=0.0, detected=True)
+        assert default.memory.estimated_toxicity_threshold == pytest.approx(
+            start * 0.95
+        )
+        assert fast.memory.estimated_toxicity_threshold == pytest.approx(start * 0.8)
+
+    def test_heat_decays_once_per_epoch_not_per_step(self):
+        from swarm.models.agent import AgentState
+
+        adversary = AdaptiveAdversary("adv")
+        adversary.observe_governance(penalty=0.0, detected=True)
+        hot = adversary.memory.current_heat_level
+
+        def observe(epoch):
+            adversary._update_memory(
+                Observation(agent_state=AgentState(agent_id="adv"), current_epoch=epoch)
+            )
+
+        observe(0)
+        observe(0)
+        assert adversary.memory.current_heat_level == hot
+        assert adversary.memory.epochs_since_detection == 0
+        observe(1)
+        observe(1)
+        assert adversary.memory.epochs_since_detection == 1
+        assert adversary.memory.current_heat_level < hot
+
+    def test_run_loop_delivers_audit_penalties(self):
+        from swarm.agents.honest import HonestAgent
+        from swarm.core.orchestrator import Orchestrator, OrchestratorConfig
+        from swarm.governance.config import GovernanceConfig
+
+        config = OrchestratorConfig(
+            n_epochs=4,
+            steps_per_epoch=5,
+            seed=3,
+            governance_config=GovernanceConfig(
+                audit_enabled=True, audit_probability=1.0, audit_threshold_p=1.0
+            ),
+        )
+        orchestrator = Orchestrator(config=config)
+        for i in range(3):
+            orchestrator.register_agent(HonestAgent(f"h{i}"))
+        adversaries = [AdaptiveAdversary(f"adv{i}") for i in range(2)]
+        for adversary in adversaries:
+            orchestrator.register_agent(adversary)
+        orchestrator.run()
+
+        attempts = sum(
+            p.attempts for a in adversaries for p in a.strategy_performance.values()
+        )
+        penalties = sum(len(a.memory.recent_penalties) for a in adversaries)
+        assert attempts > 0
+        assert penalties > 0

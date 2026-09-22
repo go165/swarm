@@ -18,6 +18,63 @@ if [ -z "$ROOT" ]; then
 fi
 cd "$ROOT"
 
+# ── Concurrent-session guard (beads oldj) ──
+# The governance shim maintains per-session heartbeats (pid-keyed, refreshed
+# on every tool call). Committing from the shared main checkout while other
+# live sessions work the same tree is the race that has repeatedly clobbered
+# staged work (exhibits in bead oldj; 2026-07-22 index war during 7ge5).
+# Default: hard block. Set SWARM_BLOCK_CONCURRENT_COMMITS=0 to downgrade to a
+# warning. Flipped from warn-by-default on 2026-07-27: the advisory fired
+# accurately, named the right pid, and the commit proceeded straight into the
+# race it described — session A's staged files were absorbed into session B's
+# commit 7907aaa1 under session B's bead id. A warning that is always correct
+# and always ignored is not a control (exhibit on bead oldj).
+HEARTBEAT_DIR="$ROOT/.claude/session-heartbeats"
+if [ "${IS_SESSION_WORKTREE:-false}" != "true" ] && [ -d "$HEARTBEAT_DIR" ]; then
+  # Heartbeats are keyed by the Claude session pid, which is an *ancestor* of
+  # this hook (claude → shell → git → hook), not our direct parent — comparing
+  # against $PPID made every solo session block on its own heartbeat (vcvh).
+  # Walk the ancestry so any heartbeat pid on our own chain is excluded.
+  _anc=" "; _p=$$
+  while [ "${_p:-0}" -gt 1 ] 2>/dev/null; do
+    _anc="${_anc}${_p} "
+    _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d '[:space:]')
+  done
+  _now=$(date +%s); _others=""
+  for _hb in "$HEARTBEAT_DIR"/*.json; do
+    [ -e "$_hb" ] || continue
+    _pid="$(basename "$_hb" .json)"
+    case "$_anc" in *" $_pid "*) continue ;; esac
+    _mt=$(stat -f %m "$_hb" 2>/dev/null || stat -c %Y "$_hb" 2>/dev/null || echo 0)
+    if [ $(( _now - _mt )) -le 900 ] && ps -p "$_pid" > /dev/null 2>&1; then
+      grep -q '"worktree": "true"' "$_hb" 2>/dev/null && continue
+      _others="$_others $_pid"
+    fi
+  done
+  if [ -n "${_others// /}" ]; then
+    echo "=========================================="
+    echo "[swarm pre-commit] CONCURRENT SESSIONS ON THIS CHECKOUT (pids:${_others})"
+    echo "=========================================="
+    echo "Another live session shares this working tree. Index races can revert"
+    echo "or interleave staged files mid-commit (bead oldj has the receipts)."
+    echo "Prefer worktrees: ./scripts/claude-tmux.sh N ; or coordinate via the"
+    echo "agent_messages table."
+    if [ "${SWARM_BLOCK_CONCURRENT_COMMITS:-1}" != "0" ]; then
+      echo "------------------------------------------"
+      echo "COMMIT BLOCKED (concurrent sessions, default since 2026-07-27)."
+      echo "Your staged changes are intact — nothing has been lost."
+      echo "Pick one:"
+      echo "  1. Move to a worktree:  ./scripts/claude-tmux.sh N"
+      echo "  2. Wait for the other session to finish, then retry"
+      echo "  3. Override for this commit only:"
+      echo "       SWARM_BLOCK_CONCURRENT_COMMITS=0 git commit ..."
+      echo "Override only when you know the other session is not mid-commit;"
+      echo "that is the window that swallows staged work."
+      exit 1
+    fi
+  fi
+fi
+
 # ── Branch guard (parallel session race detection) ──
 # If SESSION_BRANCH is set (by detect-session.sh), verify we're still on it.
 # Another tmux session sharing the same worktree can silently switch branches.
@@ -381,7 +438,124 @@ entry = {k: v for k, v in entry.items() if v or v == 0}
 print(json.dumps(entry))
 " >> "$PROVENANCE_LOG" 2>/dev/null || true
 
-# ── 7. Tests ──
+# ── 6b. Knowledge-graph ratchet (docs/scenarios changes only) ──
+# CI fails on new orphan pages / stale refs; catching it here shortens the
+# loop from ~8 CI minutes to ~2 local seconds. Only runs when staged files
+# can affect the graph. SKIP_DOCS_CHECK=1 bypasses (same knob as section 4).
+STAGED_GRAPH=$(git diff --cached --name-only --diff-filter=ACMRD | grep -E '^(docs/.*\.md|mkdocs\.yml|scenarios/.*\.ya?ml|\.kb-graph-(orphans|stale))$' || true)
+if [ -n "$STAGED_GRAPH" ] && [ -z "${SKIP_DOCS_CHECK:-}" ]; then
+    if ! python3 scripts/build_kb_graph.py --check >/tmp/kb_graph_check.$$ 2>&1; then
+        echo "[swarm pre-commit] kb-graph ratchet failed (would fail CI):"
+        tail -12 /tmp/kb_graph_check.$$
+        # Attribute each flagged item: caused by YOUR staged files, or
+        # pre-existing debt another session left. Both block (the ratchet is
+        # global, same as CI) — but knowing whose it is saves a confused
+        # search. Matching is by basename, heuristic on purpose.
+        FLAGGED=$(grep '^  ! ' /tmp/kb_graph_check.$$ | sed 's/^  ! //' || true)
+        if [ -n "$FLAGGED" ]; then
+            echo ""
+            while IFS= read -r item; do
+                base=$(basename "${item##* }")
+                if echo "$STAGED_GRAPH" | grep -q "$base"; then
+                    echo "  [likely yours]   $item"
+                else
+                    echo "  [pre-existing]   $item  (another session's debt — fix or baseline it anyway)"
+                fi
+            done <<< "$FLAGGED"
+        fi
+        echo ""
+        echo "Fixes: link the page from the corpus; baseline it (.kb-graph-orphans /"
+        echo ".kb-graph-stale); or bypass once with SKIP_DOCS_CHECK=1."
+        echo "NOTE: a 'stale ref' whose target file EXISTS usually means the target is"
+        echo "untracked — the graph reads the git index, so 'git add <target>' first."
+        rm -f /tmp/kb_graph_check.$$
+        exit 1
+    fi
+    rm -f /tmp/kb_graph_check.$$
+fi
+
+# ── 6c. Claim collision gate ──
+# Complements the heartbeat guard above: that catches shared-checkout PRESENCE
+# (index races); this catches shared-TASK ownership (duplicated work — the
+# 7ge5 build) and works across worktrees, where heartbeats don't collide.
+# If a claim marker exists (work started via `agentgit claim`), verify THIS
+# session still holds it. Same block switch as the heartbeat guard.
+CLAIM_MARKER_FILE="$ROOT/.agentgit/current-claim.json"
+if [ -f "$CLAIM_MARKER_FILE" ] && command -v python3 >/dev/null 2>&1; then
+    CLAIM_TASK=$(python3 -c "import json; print(json.load(open('$CLAIM_MARKER_FILE'))['task_id'])" 2>/dev/null || true)
+    if [ -n "$CLAIM_TASK" ]; then
+        if ! python3 -m swarm.agentgit claim check "$CLAIM_TASK" >/tmp/claim_check.$$ 2>&1; then
+            echo "=========================================="
+            echo "[swarm pre-commit] ⚠ CLAIM COLLISION on committed work:"
+            cat /tmp/claim_check.$$
+            echo "Another session claimed this task — you may have duplicated its"
+            echo "work (the 2026-07-22 failure). Check: python -m swarm.agentgit claim status"
+            echo "=========================================="
+            if [ "${SWARM_BLOCK_CONCURRENT_COMMITS:-1}" != "0" ]; then
+                echo "COMMIT BLOCKED (claim collision, default since 2026-07-27)."
+                echo "Your staged changes are intact. Resolve ownership first:"
+                echo "  python -m swarm.agentgit claim status"
+                echo "Override for this commit only:"
+                echo "  SWARM_BLOCK_CONCURRENT_COMMITS=0 git commit ..."
+                rm -f /tmp/claim_check.$$
+                exit 1
+            fi
+        fi
+        rm -f /tmp/claim_check.$$
+    fi
+fi
+
+# ── 7. beta-swarm submodule integrity ──
+# beta_swarm was folded into this repo, drifted for eight weeks against its
+# standalone copy (10 of 14 shared files differed, neither a superset), and was
+# split back out. These two guards keep that from recurring.
+# Set SWARM_BLOCK_CONCURRENT_COMMITS=0 to downgrade both to warnings.
+_SUB=beta-swarm
+_sub_block() {
+    if [ "${SWARM_BLOCK_CONCURRENT_COMMITS:-1}" != "0" ]; then
+        echo "[swarm pre-commit] BLOCKED: $1"
+        echo "  Bypass once with: SWARM_BLOCK_CONCURRENT_COMMITS=0 git commit ..."
+        exit 1
+    fi
+    echo "[swarm pre-commit] WARNING: $1"
+}
+
+# 7a. Re-vendoring guard. A top-level beta_swarm/ directory here is the mistake
+# that created the two-copies situation in the first place.
+if git diff --cached --name-only --diff-filter=A | grep -q '^beta_swarm/'; then
+    _sub_block "staged files under a top-level beta_swarm/ — that package now
+  lives in swarm-ai-research/beta-swarm, vendored as the $_SUB/ submodule.
+  Re-vendoring it recreates the divergence the split just cleaned up.
+  Work in a clone of that repo instead; see CLAUDE.md 'beta-swarm submodule'."
+fi
+
+# 7b. Pointer reachability. Committing a pointer to a commit that was never
+# pushed leaves every other checkout unable to `git submodule update`.
+if git diff --cached --name-only | grep -qx "$_SUB" && [ -d "$_SUB/.git" ] || \
+   { git diff --cached --name-only | grep -qx "$_SUB" && [ -f "$_SUB/.git" ]; }; then
+    _SHA=$(git diff --cached -- "$_SUB" | awk '/^\+Subproject commit/ {print $3}')
+    if [ -n "${_SHA:-}" ]; then
+        if ! git -C "$_SUB" cat-file -e "$_SHA^{commit}" 2>/dev/null; then
+            _sub_block "$_SUB pointer $_SHA does not exist in the submodule."
+        elif ! git -C "$_SUB" branch -r --contains "$_SHA" 2>/dev/null | grep -q .; then
+            _sub_block "$_SUB pointer ${_SHA:0:8} is not on any remote branch —
+  push the submodule first, or everyone else gets
+  'fatal: remote error: upload-pack: not our ref'.
+      git -C $_SUB push origin HEAD:main"
+        else
+            # Reachable, but is it stale? Warn only; a deliberate older pointer
+            # is legitimate.
+            if git -C "$_SUB" fetch origin main --quiet 2>/dev/null; then
+                _BEHIND=$(git -C "$_SUB" rev-list --count "$_SHA"..origin/main 2>/dev/null || echo 0)
+                if [ "${_BEHIND:-0}" -gt 0 ]; then
+                    echo "[swarm pre-commit] note: $_SUB pointer is $_BEHIND commit(s) behind origin/main."
+                fi
+            fi
+        fi
+    fi
+fi
+
+# ── 8. Tests ──
 # Tests run in pre-push (via `make ci`), NOT pre-commit.
 # This keeps commits fast (~2s) and avoids HEAD race conditions
 # when parallel sessions share a worktree.

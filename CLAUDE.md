@@ -35,6 +35,54 @@ Large/supplementary files live in a separate repo: [`swarm-ai-research/swarm-art
 
 These directories are gitignored in main. Local `runs/` and `docs/papers/` are still used as working directories — they just aren't committed here.
 
+### beta-swarm submodule
+
+The distributional generalization (a full `Beta(alpha, beta)` belief over a
+continuous outcome, rather than a scalar `p`) lives in its own repo:
+[`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm),
+vendored here as the **`beta-swarm/`** submodule. It has no imports to or from
+`swarm/` in either direction — that is why it could be split out.
+
+```bash
+git submodule update --init          # fetch it
+python -m pip install -e beta-swarm/ # make `import beta_swarm` resolve
+python -m pytest beta-swarm/tests/   # its 161 tests run separately
+```
+
+This repo's own `pytest tests/` does **not** cover it, and CI does not check out
+the submodule. Changes to `beta_swarm` code belong in that repo, not here;
+committing here only moves the submodule pointer.
+
+It was folded into this repo in `8e2a3984` and split back out after the two
+copies diverged in both directions (`98557793` ported the missing half back
+before the split, so nothing was lost). If you find yourself re-vendoring it,
+read `docs/research/hmc-proxy-posterior.md` first — the divergence cost a
+reconciliation.
+
+Epic `fcmy` tracks its posterior-inference work and **stays in this repo's bead
+tracker** even though the code now lives elsewhere.
+
+#### In session worktrees: `beta-swarm/` is empty on purpose
+
+All sessions share **one** Python interpreter — there are no per-session venvs —
+so an editable install is a single global path entry in site-packages. If each
+worktree ran `pip install -e beta-swarm/`, whichever session installed last would
+silently own `import beta_swarm` for all of them, and every other session would
+be importing a checkout it is not looking at.
+
+So the main checkout owns the install. `scripts/claude-tmux.sh` calls
+`ensure_beta_swarm` once before creating any worktree, and deliberately does
+**not** pass `--recurse-submodules` to `git worktree add`. In a session worktree
+`beta-swarm/` stays empty (with an `EMPTY-BY-DESIGN.md` marker saying why), while
+`import beta_swarm` still resolves — to `$MAIN_REPO_ROOT/beta-swarm`.
+
+The consequence to keep in mind: what you import in a worktree is the **main
+checkout's** submodule commit, not whatever pointer your branch happens to
+record. That is fine for reading and for running `swarm` code that touches it.
+It is not fine for editing. **To change `beta_swarm` code, clone that repo**
+(`gh repo clone swarm-ai-research/beta-swarm`) and work there; a commit in this
+repo only moves the pointer.
+
 ### Run artifacts
 
 Prefer writing experiment outputs to a self-contained run folder:
@@ -194,6 +242,50 @@ Each session pane has these env vars set via `scripts/detect-session.sh`:
 
 Use `bd --sandbox` in worktrees to avoid contention with the main repo's beads daemon. The `/ship` command does this automatically.
 
+### Concurrency guard (heartbeats)
+
+Every session maintains a pid-keyed heartbeat in `.claude/session-heartbeats/`
+(written by the governance shim on session start and refreshed on every tool
+call). When a session that is **not** in an isolated worktree starts — or
+commits — while another live session shares the checkout, it gets a loud
+warning naming the other pids (exhibits of why: bead `oldj`). **Since
+2026-07-27 the commit-time check is a hard block by default**; set
+`SWARM_BLOCK_CONCURRENT_COMMITS=0` to downgrade it to the old warning. Worktree
+sessions (`IS_SESSION_WORKTREE=true`) are exempt — that is the sanctioned way to
+run concurrently.
+
+The default was flipped after the advisory version failed in the way it
+predicted: it fired, named the correct pid, and the commit proceeded into the
+race anyway — one session's staged files were absorbed into another session's
+commit under the wrong bead id. A blocked commit loses nothing (staged changes
+survive; move to a worktree or retry), while the race it prevents costs
+provenance and can cost work. The same switch also governs the claim-collision
+gate.
+
+### Session Work-Start Protocol (`/claim`)
+
+**Before doing real work on a bead, claim it: `/claim <bead-id>`.** This is the
+one step that physically prevents two sessions building the same thing (the
+2026-07-22 duplicate-7ge5 incident, where ~2× effort was wasted because neither
+session claimed first). The claim is atomic in the shared cross-worktree DB
+(`$MAIN_REPO_ROOT/runs/runs.db`): the first session wins, every other is
+**refused** with the holder's name. It replaces the advisory
+`bd update <id> --status=in_progress` (which `/claim` still runs for you) and
+writes a marker the pre-commit hook checks — a collision at commit time means
+someone took your task mid-flight. `/claim status` shows all holdings;
+`/claim release <bead-id>` when done. Read-only investigation needs no claim;
+claim once you intend to change files.
+
+If dispatch stamped the bead with a `WARDS:` line, `/claim` composes that
+track bound with your declaration (`.agentgit/wards.json` / `$AGENT_WARDS`)
+and refuses (exit 3) a claim that would widen it — a child may only narrow
+(INV-6). The effective ward set, negative spec included, is written into the
+claim marker. Unstamped beads claim as before. See `/claim` → "Wards".
+
+This complements the **heartbeat concurrency guard** above (presence-level:
+"don't two of you be in one checkout") with task-level ownership ("don't two of
+you do one task") — and unlike heartbeats, it works across isolated worktrees.
+
 ### Inter-Session Coordination (`agent_messages`)
 
 Sessions coordinate via a shared SQLite table in `runs/runs.db` (accessible through the `sqlite_runs` MCP server). Schema:
@@ -209,12 +301,27 @@ CREATE TABLE agent_messages (
 );
 -- Partial index for fast inbox queries
 CREATE INDEX idx_agent_messages_to_unacked ON agent_messages (to_agent, acked) WHERE acked = 0;
+-- Artifact-only DONE enforcement (erdos-1038 lesson 5, docs/research/erdos-1038-swarm-lessons.md):
+-- a DONE row must carry a commit hash, a runs/ path, or an explicit artifact= tag.
+CREATE TRIGGER IF NOT EXISTS done_requires_artifact
+BEFORE INSERT ON agent_messages
+FOR EACH ROW
+WHEN NEW.body LIKE 'DONE:%'
+  AND NEW.body NOT LIKE '%artifact=%'
+  AND NEW.body NOT LIKE '%runs/%'
+  AND NEW.body NOT GLOB '*[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*'
+BEGIN
+  SELECT RAISE(ABORT, 'DONE rows need a concrete artifact: commit hash, runs/ path, or artifact=<ref> (optionally gate=<check>:<result>). Status reports are not DONE - see CLAUDE.md section agent_messages');
+END;
 ```
 
 **Message conventions:**
 - `ONLINE: ready for work` — announce session start
 - `CLAIM: <beads-id>` — claim a task (check before starting work to avoid duplicates)
-- `DONE: <beads-id>: <summary>` — announce completion
+- `DONE: <beads-id>: <summary> <commit|runs/path|artifact=ref> gate=<check>:<result>` —
+  announce completion. The trigger above rejects DONE rows with no artifact reference;
+  `gate=` is convention (state which check ran and its result, or `gate=none`), enforced
+  by the `/bv-dispatch` retro rather than the trigger.
 - `BLOCKED: <description>` — ask for help
 
 **Usage from any session:**
@@ -229,6 +336,11 @@ UPDATE agent_messages SET acked = 1 WHERE id = <msg_id>;
 
 If the table doesn't exist (fresh `runs.db`), create it with the schema above.
 
+For atomic claims, advisory file/module locks, structured proposals, and early
+conflict detection (beyond `CLAIM:` message strings), prefer the coordination
+primitives in the same database: `python -m swarm.agentgit coord claim|lock|conflicts|propose|status`
+(see `docs/agentgit_mvp.md` § Machine-Speed Coordination).
+
 ## Paper Author Resolution
 
 When `/write_paper` or `/compile_paper` needs an author name, resolve in this order:
@@ -242,6 +354,8 @@ Never guess or infer from the OS username.
 ## Test fix discipline
 
 - When fixing a flaky test, prefer making it deterministic (set seeds, constrain inputs) over loosening assertions.
+- Before fixing a beads-filed bug, verify the cited code at HEAD first (`grep` the cited lines, `git log -S` the symbol): in multi-session periods ~30% of filed bugs are already fixed — the filer worked from a stale snapshot. Close those with the fixing commit hash as evidence instead of re-fixing.
+- After rewriting a source file with a script (python heredoc, sed -i), a same-second mtime can defeat Python's bytecode-cache invalidation: imports then silently run the OLD code while the file shows the new code (observed twice on 2026-07-18). If a just-edited module behaves as if unchanged, `rm -rf` the package's `__pycache__` (or run `python -B`) before debugging further.
 
 ## Blog post disclaimers
 

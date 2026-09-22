@@ -1,0 +1,21 @@
+# Specialized experiment config; run with python -m experiments.deadline_pressure.
+# Only deadline_ticks varies between paired conditions. Clock ticks are modeled
+# elapsed time, not measured inference latency or evidence about training.
+scenario_id: deadline_pressure
+seed: 42
+replicates: 5
+deadlines:
+  tight: 6
+  relaxed: 16
+generated_token_budget: 2048  # shared by coordinator and all delegated workers
+max_tokens_per_call: 128
+downstream_tokens: 128       # identical, separate measurement allowance
+model: qwen2.5:14b
+task:
+  question: What is the total number of resolved tickets across the three ledgers?
+  records: [17, 19, 11]
+  peer_answer: 42
+cost_ticks:
+  decision: 1
+  delegate: 2
+  verify: 3

@@ -1,0 +1,88 @@
+"""Run counterfactual resampling on a local model and simulated wiki board."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+
+from swarm.bridges.wiki_resampling.config import ExperimentConfig
+from swarm.bridges.wiki_resampling.model import OllamaClient
+from swarm.bridges.wiki_resampling.runner import run_experiment
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("scenario", type=Path)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--resamples", type=int)
+    parser.add_argument("--seed", type=int, help="override the scenario seed")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume an incomplete run from partial JSONL artifacts",
+    )
+    parser.add_argument(
+        "--task",
+        action="append",
+        default=[],
+        help="run only this task_id (repeatable)",
+    )
+    args = parser.parse_args(argv)
+
+    cfg = ExperimentConfig.from_yaml(args.scenario)
+    if args.seed is not None:
+        cfg = replace(cfg, seed=args.seed)
+    if args.task:
+        wanted = set(args.task)
+        tasks = tuple(task for task in cfg.tasks if task.task_id in wanted)
+        missing = wanted - {task.task_id for task in tasks}
+        if missing:
+            parser.error(f"unknown task_id(s): {', '.join(sorted(missing))}")
+        cfg = replace(cfg, tasks=tasks)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = args.out or Path("runs") / f"{stamp}_{cfg.scenario_id}_seed{cfg.seed}"
+    client = OllamaClient(
+        model=cfg.ollama.model,
+        base_url=cfg.ollama.base_url,
+        temperature=cfg.ollama.temperature,
+        max_tokens=cfg.ollama.max_tokens,
+        timeout=cfg.ollama.timeout,
+    )
+    result = run_experiment(
+        cfg,
+        client,
+        out_dir=out,
+        continuations_per_condition=args.resamples,
+        resume=args.resume,
+        progress=_print_progress,
+    )
+    print(f"wrote {out}")
+    for summary_index, _row in enumerate(result["summary"]):
+        print(_format_summary(summary_index))
+    return 0
+
+
+def _format_summary(summary_index: int) -> str:
+    """Format a local counter without echoing scenario- or model-derived data."""
+
+    return f"summary={summary_index} written to summary.json"
+
+
+def _print_progress(event: dict[str, object]) -> None:
+    branches_value = event["branch_completed"]
+    if not isinstance(branches_value, int):
+        raise TypeError("branch_completed progress value must be an integer")
+    branches = branches_value
+    if event["event"] == "base_completed" or branches % 10 == 0:
+        print(
+            f"progress bases={event['base_completed']} branches={branches}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

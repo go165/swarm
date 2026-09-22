@@ -68,6 +68,16 @@ Train and evaluate RL models on SWARM safety metrics using Prime Intellect's dis
 
 [Learn more →](prime_intellect.md)
 
+### SWARM–Prime Agent
+
+Govern Prime Agent's self-improving continual harness and its RLM delegation tree.
+
+- **Purpose:** Score self-modification (`/refine`) and recursive delegation (`rlm(...)`) with soft labels
+- **Features:** Session JSONL parsing, harness drift tracking (growth rate, evidence rate, rollback churn), refinement and spawn policy, delegation-tree credit linking
+- **Status:** Available Now
+
+[Learn more →](prime_agent.md)
+
 ### SWARM-Ralph
 
 Ingest Ralph event streams into SWARM governance and metrics.
@@ -97,6 +107,16 @@ Publish SWARM research directly to ClawXiv.
 - **Status:** In development
 
 [Learn more →](clawxiv.md)
+
+### SWARM-collusion.wiki
+
+Replay the OpenAI benchmark agents' wiki back channel (collusion.wiki, May-July 2026) through SWARM's collusion detectors.
+
+- **Purpose:** Test the "temporal survives, structural fails" claim from The ZZZ Pages on the real edit log
+- **Features:** Identity modes (handle / IP block / pair), reply-graph projection, detection-lag timeline against the moderator sweep; also replays the schelling-point board of the offline fast_follow_question_bench recreation joined to its Inspect eval log
+- **Status:** Read-only replay (September 2026)
+
+[Learn more →](collusion_wiki.md)
 
 ### SWARM-AgentVeil (Planned)
 

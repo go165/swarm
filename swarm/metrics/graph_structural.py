@@ -10,6 +10,12 @@ score pairs/groups against a threshold. This module flags coalitions by
     * Reciprocity z-score vs configuration model.
     * Label-propagation community detection.
     * Configuration-model null sampler -> p-values, not magic thresholds.
+    * Bipartite (hub-aware) nulls for graphs projected from agent->object
+      incidences (beads-y2t2): rewire who edited which object while
+      preserving each agent's and each object's edit count, then
+      re-project. ``"membership"`` additionally keeps every agent's
+      per-object counts, so a hot hub page is reproduced by the null
+      instead of rejected by it.
 
 Zero external dependency (matches swarm/analysis/network.py convention).
 Inputs are a list of weighted directed edges, easily produced from
@@ -35,6 +41,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from swarm.models.interaction import SoftInteraction
 
 Edge = Tuple[str, str, float]
+# One agent->object membership (an edit of a page, a post in a thread);
+# repeated entries are repeated memberships. Order matters for the
+# ``"sequential"`` projection, so pass incidences in time order.
+Incidence = Tuple[str, str]
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +211,133 @@ def edges_from_interactions(
 
 
 # ---------------------------------------------------------------------------
+# Bipartite projection (beads-y2t2)
+# ---------------------------------------------------------------------------
+
+
+def project_incidence(
+    incidence: Sequence[Incidence],
+    *,
+    projection: str = "sequential",
+) -> List[Edge]:
+    """Project agent->object memberships onto weighted agent->agent edges.
+
+    ``"sequential"`` mirrors the collusion.wiki bridge's ``agent``
+    projection: each membership is a reply from its agent to the previous
+    *distinct* agent on the same object, in list order; object-creating
+    and self-follow-up memberships produce no edge. Applied to the
+    incidence a graph was built from, it reproduces that graph.
+
+    ``"co_membership"`` connects every pair of distinct agents that share
+    an object, both directions, weight = number of shared objects.
+    """
+    agg: Dict[Tuple[str, str], float] = defaultdict(float)
+    if projection == "sequential":
+        last: Dict[str, str] = {}
+        for agent, obj in incidence:
+            prev = last.get(obj)
+            last[obj] = agent
+            if prev is None or prev == agent:
+                continue
+            agg[(agent, prev)] += 1.0
+    elif projection == "co_membership":
+        members: Dict[str, Set[str]] = defaultdict(set)
+        for agent, obj in incidence:
+            members[obj].add(agent)
+        for group in members.values():
+            ordered = sorted(group)
+            for u in ordered:
+                for v in ordered:
+                    if u != v:
+                        agg[(u, v)] += 1.0
+    else:
+        raise ValueError(f"unknown projection: {projection!r}")
+    return [(u, v, w) for (u, v), w in agg.items()]
+
+
+def bipartite_null(
+    incidence: Sequence[Incidence],
+    *,
+    seed: int = 0,
+    projection: str = "sequential",
+    preserve_membership: bool = False,
+) -> DiGraph:
+    """Hub-aware null: rewire the agent->object bipartite multigraph, then
+    project (beads-y2t2).
+
+    Agent stubs are permuted across the membership slots, so every agent
+    keeps its membership count and every object keeps its membership
+    count *and* its slot order (the sequential projection therefore sees
+    the same per-object reply chain length as the observed graph).
+
+    Two strengths, chosen by ``preserve_membership``:
+
+    - ``False`` (``null="bipartite"``): the bipartite configuration
+      model. Stubs are permuted across *all* slots, so the null
+      randomises which objects an agent touched as well as who it met
+      there. A set of agents that concentrate on one page while the rest
+      of the population is spread over many is non-random under this
+      null: hub *concentration* still counts as structure.
+    - ``True`` (``null="membership"``): stubs are permuted within each
+      object's own slots, so every agent keeps its per-object edit
+      counts and the bipartite multigraph is preserved exactly. Only the
+      reply order on each object is randomised. Shared page membership
+      is then part of the null, and what survives it is coordination
+      *beyond* membership: members who keep following each other on a
+      busy page more than their share of its edits predicts. Two agents
+      alternating alone on a private page are invisible to it (the
+      pair's edges are order-invariant).
+
+    Why a second null at all: the configuration model preserves agent
+    degrees only. On a graph projected from a hot hub page every
+    co-editor is a reply neighbour of every other, the configuration
+    model cannot put that many stubs back on the same page, and it
+    rejects every community on the board (collusion.wiki replay: 57/57
+    candidates at the p-value floor).
+    """
+    rng = random.Random(seed)
+    agents = [agent for agent, _ in incidence]
+    objects = [obj for _, obj in incidence]
+    if preserve_membership:
+        slots: Dict[str, List[int]] = defaultdict(list)
+        for i, obj in enumerate(objects):
+            slots[obj].append(i)
+        for obj in sorted(slots):
+            idx = slots[obj]
+            labels = [agents[i] for i in idx]
+            rng.shuffle(labels)
+            for i, lab in zip(idx, labels, strict=True):
+                agents[i] = lab
+    else:
+        rng.shuffle(agents)
+    return DiGraph.from_edges(
+        project_incidence(list(zip(agents, objects, strict=True)), projection=projection)
+    )
+
+
+def _null_graph(
+    g: DiGraph,
+    *,
+    seed: int,
+    null: str,
+    incidence: Optional[Sequence[Incidence]],
+    projection: str,
+) -> DiGraph:
+    if null == "configuration":
+        return configuration_model_null(g, seed=seed)
+    if null == "reciprocity":
+        return reciprocity_preserving_null(g, seed=seed)
+    if null in ("bipartite", "membership"):
+        if incidence is None:
+            raise ValueError(f"null={null!r} needs the incidence the graph was projected from")
+        return bipartite_null(
+            incidence, seed=seed, projection=projection,
+            preserve_membership=(null == "membership"),
+        )
+    raise ValueError(f"unknown null model: {null!r}")
+
+
+# ---------------------------------------------------------------------------
 # k-core
 # ---------------------------------------------------------------------------
 
@@ -343,19 +480,137 @@ def configuration_model_null(g: DiGraph, *, seed: int = 0) -> DiGraph:
     return DiGraph.from_edges(edges)
 
 
+def _swap_rewire(
+    pairs: List[Tuple[str, str]],
+    rng: random.Random,
+    *,
+    symmetric: bool,
+    forbidden: Optional[Set[Tuple[str, str]]] = None,
+) -> List[Tuple[str, str]]:
+    """Double-edge swap (Maslov-Sneppen): rewire in place, preserving degree
+    AND the exact number of edges.
+
+    Stub matching -- what :func:`configuration_model_null` uses -- loses
+    edges whenever two stubs collide or form a self-loop, so its output is
+    systematically sparser than the input. Swapping never changes the edge
+    count, which is what :func:`density_pvalue` needs (see bead 1a2w).
+    """
+    edges = list(pairs)
+    if len(edges) < 2:
+        return edges
+    present = {(u, v) for u, v in edges}
+    if symmetric:
+        present |= {(v, u) for u, v in edges}
+    # Positions already taken by the other edge class. Without this a rewired
+    # one-way edge can land on (or opposite) a mutual dyad, which both loses
+    # an edge to the merge and invents reciprocity the observed graph lacked.
+    blocked = forbidden or set()
+    for _ in range(10 * len(edges)):
+        i, j = rng.randrange(len(edges)), rng.randrange(len(edges))
+        if i == j:
+            continue
+        a, b = edges[i]
+        c, d = edges[j]
+        if len({a, b, c, d}) < 4:
+            continue
+        if (a, d) in present or (c, b) in present:
+            continue
+        if (a, d) in blocked or (c, b) in blocked:
+            continue
+        if not symmetric and ((d, a) in present or (b, c) in present):
+            # A one-way edge must stay one-way: landing opposite another
+            # one-way edge would invent a mutual dyad and inflate the null's
+            # reciprocity above the observed value.
+            continue
+        present.discard((a, b))
+        present.discard((c, d))
+        if symmetric:
+            present.discard((b, a))
+            present.discard((d, c))
+        edges[i], edges[j] = (a, d), (c, b)
+        present.add((a, d))
+        present.add((c, b))
+        if symmetric:
+            present.add((d, a))
+            present.add((b, c))
+    return edges
+
+
+def reciprocity_preserving_null(g: DiGraph, *, seed: int = 0) -> DiGraph:
+    """Null that preserves degree, the mutual-dyad structure, AND edge count.
+
+    Two defects in ``"configuration"`` motivate this (bead 1a2w, measured in
+    docs/research/collusion-detector-false-positives.md):
+
+    1. Stub matching drops 8-23% of edges to collisions and self-loops, so the
+       null is systematically sparser than the observed graph. That makes
+       ``density_pvalue`` report the *whole graph* as significantly dense
+       (p=0.0196), which is impossible -- a graph cannot be denser than
+       itself -- and it is why every large candidate is flagged.
+    2. It destroys mutuality, so any corpus where partners answer each other
+       scores as anomalous. Real AI Village chat ran reciprocity 0.90 against
+       ``reciprocity_z`` ~7.5.
+
+    Edges are split into mutual dyads and one-way edges and rewired
+    separately by double-edge swap, so mutual-degree, one-way-degree and the
+    exact edge count are all preserved. Against this null the question
+    sharpens to: is this group denser and more mutual than chance *given*
+    that conversation is already reciprocal?
+    """
+    rng = random.Random(seed)
+    mutual: List[Tuple[str, str]] = []
+    one_way: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for u in sorted(g.nodes):
+        for v in sorted(g.out.get(u, {})):
+            if u == v:
+                continue
+            if u in g.out.get(v, {}):
+                key = (u, v) if u < v else (v, u)
+                if key not in seen:
+                    seen.add(key)
+                    mutual.append(key)
+            else:
+                one_way.append((u, v))
+
+    edges: List[Edge] = []
+    taken: Set[Tuple[str, str]] = set()
+    for u, v in _swap_rewire(mutual, rng, symmetric=True):
+        edges.append((u, v, 1.0))
+        edges.append((v, u, 1.0))
+        taken.add((u, v))
+        taken.add((v, u))
+    for u, v in _swap_rewire(one_way, rng, symmetric=False, forbidden=taken):
+        edges.append((u, v, 1.0))
+    return DiGraph.from_edges(edges)
+
+
 def reciprocity_zscore(
     g: DiGraph,
     subset: Optional[Set[str]] = None,
     *,
     n_samples: int = 50,
     seed: int = 0,
+    null: str = "configuration",
+    incidence: Optional[Sequence[Incidence]] = None,
+    projection: str = "sequential",
 ) -> Tuple[float, float]:
-    """Return (observed_reciprocity, z_score) for ``subset`` vs null model."""
+    """Return (observed_reciprocity, z_score) for ``subset`` vs null model.
+
+    ``null`` is ``"configuration"`` (degree-preserving, default),
+    ``"bipartite"`` or ``"membership"`` (:func:`bipartite_null`, both need
+    ``incidence``).
+    """
     observed = g.reciprocity(subset)
     samples = []
     for i in range(n_samples):
-        null = configuration_model_null(g, seed=seed + i)
-        samples.append(null.reciprocity(subset if subset is None else subset & null.nodes))
+        null_g = _null_graph(
+            g, seed=seed + i, null=null, incidence=incidence, projection=projection
+        )
+        # Isolates are omitted from DiGraph.nodes; pass the observed
+        # subset so missing members are treated as isolates rather than
+        # dropped from the comparison.
+        samples.append(null_g.reciprocity(subset))
     mean = sum(samples) / len(samples)
     var = sum((s - mean) ** 2 for s in samples) / len(samples)
     std = var ** 0.5
@@ -371,9 +626,19 @@ def density_pvalue(
     *,
     n_samples: int = 50,
     seed: int = 0,
+    null: str = "configuration",
+    incidence: Optional[Sequence[Incidence]] = None,
+    projection: str = "sequential",
 ) -> float:
-    """Empirical p-value that the *same nodes* in a degree-matched null
-    graph have internal density >= the observed density of ``subset``.
+    """Empirical p-value that the *same nodes* in a null graph have
+    internal density >= the observed density of ``subset``.
+
+    ``null="configuration"`` (default) matches the degree sequence;
+    ``null="bipartite"`` and ``null="membership"`` rewire the
+    agent->object ``incidence`` the graph was projected from and
+    re-project it (beads-y2t2, :func:`bipartite_null`); under
+    ``"membership"`` shared page membership is part of the null rather
+    than evidence against it.
 
     This is the right test for "is THIS coalition denser than chance".
     The earlier implementation took the null's *globally densest*
@@ -397,11 +662,15 @@ def density_pvalue(
     observed_density = observed_edges / len(subset)
     hits = 0
     for i in range(n_samples):
-        null = configuration_model_null(g, seed=seed + i)
-        # density on the SAME nodes in the null (correct subset-conditioned test)
-        live = subset & null.nodes
-        null_edges = null.induced_edge_count(live)
-        null_density = null_edges / max(1, len(live))
+        null_g = _null_graph(
+            g, seed=seed + i, null=null, incidence=incidence, projection=projection
+        )
+        # Same node set as observed: DiGraph omits isolates, so missing
+        # members are isolates (0 edges), and density is always over
+        # len(subset) — intersecting with null_g.nodes would shrink the
+        # denominator and inflate null density.
+        null_edges = null_g.induced_edge_count(subset)
+        null_density = null_edges / len(subset)
         if null_density >= observed_density:
             hits += 1
     return (hits + 1) / (n_samples + 1)
@@ -432,6 +701,31 @@ class StructuralAnomaly:
     # mutuality (min/max ratio per pair), not just presence.
     total_internal_weight: float = 0.0
     weighted_reciprocity: float = 0.0
+    # Temporal-shape signals (beads-p56u), populated only by
+    # :func:`temporal_densest_anomalies`; the static detector leaves the
+    # 0.0 defaults. ``temporal_concentration`` scores the one-flare shape
+    # (activity packed into few windows), ``temporal_persistence`` the
+    # recurring shape (same set lights up window after window). Like the
+    # weighted signals above, they are data for downstream consumers and
+    # are not folded into ``rank_aggregated_scores``.
+    temporal_concentration: float = 0.0
+    temporal_persistence: float = 0.0
+    # Number of distinct time windows in which this (Jaccard-matched)
+    # member set surfaced as a per-window anomaly. 0 = static detection
+    # (no window pass); 1 = one-window flare; >= 2 = recurring coalition.
+    # The load-bearing distinction: candidates mined FROM a window are
+    # window-concentrated by construction, so concentration alone cannot
+    # separate a planted burst coalition from honest one-window noise —
+    # recurrence of the same set across windows can (beads-p56u).
+    n_windows_surfaced: int = 0
+    # Fraction of the whole graph's nodes this cluster covers (bead 1a2w).
+    # Always populated by :func:`detect_structural_anomalies`; 0.0 when the
+    # anomaly was built by hand or by a path that has no graph to compare to.
+    # A cluster at ~1.0 is not a finding about coordination, it is a
+    # restatement of the population -- see
+    # docs/research/collusion-detector-false-positives.md, where every
+    # flagged cluster on real chat covered 87-100% of the agents.
+    size_fraction: float = 0.0
 
     @property
     def edge_probability(self) -> float:
@@ -465,12 +759,32 @@ def detect_structural_anomalies(
     min_size: int = 3,
     n_null_samples: int = 50,
     seed: int = 0,
+    null: str = "configuration",
+    incidence: Optional[Sequence[Incidence]] = None,
+    projection: str = "sequential",
+    max_size_fraction: Optional[float] = None,
 ) -> List[StructuralAnomaly]:
     """End-to-end detector: build graph, run all four signals, return
     one anomaly record per candidate cluster.
 
     Candidates come from (a) Charikar densest subgraph and (b) each label-
     propagation community of size >= ``min_size``. Duplicates are merged.
+
+    ``null`` selects the null model behind ``reciprocity_z`` and
+    ``pvalue``: ``"configuration"`` (default, degree-preserving),
+    ``"reciprocity"`` (:func:`reciprocity_preserving_null`, also preserves
+    mutual dyads), ``"bipartite"`` or ``"membership"``; the last two need
+    the agent->object ``incidence`` that ``edges`` were projected from (see
+    :func:`bipartite_null`). Candidate extraction and the other signals
+    do not depend on the null.
+
+    ``max_size_fraction`` drops candidates covering more than that fraction
+    of the graph's nodes. Default ``None`` keeps every candidate, which is
+    the historical behaviour -- beads qoro and 3ru4 published numbers under
+    it, so changing the default would silently invalidate closed work. On
+    dense observational graphs the detector otherwise returns the whole
+    population as a coalition (bead 19n0); ~0.5 is a reasonable starting
+    point there, but it is a prior and should be chosen deliberately.
     """
     g = DiGraph.from_edges(edges)
     if len(g.nodes) < min_size:
@@ -493,8 +807,14 @@ def detect_structural_anomalies(
     for cand in candidates:
         n_edges = g.induced_edge_count(cand)
         density = n_edges / len(cand)
-        rec, z = reciprocity_zscore(g, cand, n_samples=n_null_samples, seed=seed)
-        pval = density_pvalue(g, cand, n_samples=n_null_samples, seed=seed)
+        rec, z = reciprocity_zscore(
+            g, cand, n_samples=n_null_samples, seed=seed,
+            null=null, incidence=incidence, projection=projection,
+        )
+        pval = density_pvalue(
+            g, cand, n_samples=n_null_samples, seed=seed,
+            null=null, incidence=incidence, projection=projection,
+        )
         # find community label, if any
         lab: Optional[str] = next(
             (cl for cl, m in communities.items() if m == cand), None
@@ -511,8 +831,11 @@ def detect_structural_anomalies(
                 pvalue=pval,
                 total_internal_weight=g.induced_edge_weight(cand),
                 weighted_reciprocity=g.weighted_reciprocity(cand),
+                size_fraction=len(cand) / len(g.nodes),
             )
         )
+    if max_size_fraction is not None:
+        results = [r for r in results if r.size_fraction <= max_size_fraction]
     return results
 
 
@@ -663,6 +986,66 @@ def temporal_concentration(
     return 1.0 - entropy / max_entropy if max_entropy > 0 else 0.0
 
 
+def cross_window_persistence(
+    interactions: Sequence[SoftInteraction],
+    members: Set[str],
+    *,
+    n_windows: int = 10,
+    min_internal_edges: int = 1,
+) -> float:
+    """Fraction of active time windows in which ``members`` interact
+    internally (beads-p56u).
+
+    Complement of :func:`temporal_concentration`: concentration scores
+    the *one-flare* shape (all activity packed into few windows),
+    persistence scores the *recurring* shape (the same set lights up
+    window after window). A coalition that persists across many windows
+    is more suspicious than one that flares once — a single-window
+    flare can be coincidental co-activity; ten-for-ten recurrence is a
+    standing channel.
+
+    Windows are ``n_windows`` equal-width bins spanning the full
+    observed time range. The denominator counts *active* windows
+    (windows containing any interaction at all), so globally quiet
+    periods don't dilute the score. A window counts for ``members``
+    when it contains at least ``min_internal_edges`` interactions with
+    both endpoints in ``members``.
+
+    Returns a value in [0, 1]; 0.0 when there are no interactions, no
+    time axis (all timestamps equal), or no in-cluster interactions.
+
+    Caveat for consumers: raw persistence does not separate honest
+    from coordinated on its own — a healthy community also recurs.
+    It is a *shape* signal, meaningful for candidates that already
+    carry structural evidence (density / reciprocity / null-model
+    p-value); the ROC-bench adapter gates it on exactly that.
+    """
+    if not interactions or n_windows < 2:
+        return 0.0
+    times = [ix.timestamp for ix in interactions]
+    t_min = min(times)
+    t_max = max(times)
+    span = (t_max - t_min).total_seconds()
+    if span <= 0:
+        return 0.0
+    active = [False] * n_windows
+    internal_counts = [0] * n_windows
+    for ix in interactions:
+        offset = (ix.timestamp - t_min).total_seconds()
+        bin_idx = min(n_windows - 1, int(n_windows * offset / span))
+        active[bin_idx] = True
+        if ix.initiator in members and ix.counterparty in members:
+            internal_counts[bin_idx] += 1
+    n_active = sum(active)
+    if n_active == 0:
+        return 0.0
+    n_hit = sum(
+        1 for i in range(n_windows)
+        if internal_counts[i] >= min_internal_edges
+    )
+    return n_hit / n_active
+
+
 def temporal_densest_anomalies(
     interactions: Sequence[SoftInteraction],
     *,
@@ -670,21 +1053,47 @@ def temporal_densest_anomalies(
     min_size: int = 3,
     n_null_samples: int = 20,
     seed: int = 0,
+    match_threshold: float = 0.6,
 ) -> List[StructuralAnomaly]:
-    """Per-window structural anomaly detection (beads-p56u).
+    """Per-window structural anomaly detection with cross-window
+    recurrence tracking (beads-p56u).
+
+    ``match_threshold`` is deliberately above 0.5: two unrelated
+    size-3 sets sharing 2 members score exactly J = 2/4 = 0.5, so a
+    0.5 threshold lets chance overlaps between small honest subsets
+    masquerade as recurrence. At 0.6 they don't match, while a planted
+    coalition re-surfacing with one member missing still does
+    (J = 4/5 = 0.8 for a 5-set).
 
     Splits ``interactions`` into ``n_windows`` equal-width time bins
     and runs :func:`detect_structural_anomalies` on each window's
-    induced subgraph. Returns the union of resulting anomalies,
-    de-duplicated by member set (different windows surfacing the
-    same subset are kept once).
+    induced subgraph. Anomalies from different windows whose member
+    sets Jaccard-overlap by at least ``match_threshold`` are treated
+    as the *same coalition recurring*: one representative (the
+    first-surfaced anomaly) is returned, with ``n_windows_surfaced``
+    counting the distinct windows in which the group appeared. Each
+    representative also carries its :func:`temporal_concentration`
+    and :func:`cross_window_persistence` (computed over the full
+    interaction stream) so consumers can distinguish the one-flare
+    shape from the standing-channel shape without recomputing.
 
-    The point: a coalition that bursts in 2-3 windows of an
-    otherwise-quiet 10-window run produces small, dense anomalies in
-    those windows even when its aggregated edges look like just
-    another sparse part of the full graph. The static detector sees
-    aggregated edges and bundles the coalition with the surrounding
-    background community; per-window detection isolates the burst.
+    Why recurrence is the load-bearing signal: any candidate mined
+    from a single window is concentrated in that window *by
+    construction*, so honest co-activity noise looks exactly like a
+    burst coalition on the concentration axis. What noise cannot do
+    is re-assemble the same member set in other windows — a planted
+    coalition bursting 3 times surfaces 3 times
+    (``n_windows_surfaced >= 2``), while ephemeral honest subsets
+    surface once. Consumers should treat one-window candidates as
+    noise unless corroborated by other evidence.
+
+    The point of the window pass itself: a coalition that bursts in
+    2-3 windows of an otherwise-quiet 10-window run produces small,
+    dense anomalies in those windows even when its aggregated edges
+    look like just another sparse part of the full graph. The static
+    detector sees aggregated edges and bundles the coalition with the
+    surrounding background community; per-window detection isolates
+    the burst.
     """
     if not interactions or n_windows < 1:
         return []
@@ -702,8 +1111,16 @@ def temporal_densest_anomalies(
         offset = (ix.timestamp - t_min).total_seconds()
         bin_idx = min(n_windows - 1, int(n_windows * offset / span))
         window_buckets[bin_idx].append(ix)
-    seen: List[Set[str]] = []
-    merged: List[StructuralAnomaly] = []
+
+    def _jaccard(a: Set[str], b: Set[str]) -> float:
+        inter = len(a & b)
+        if inter == 0:
+            return 0.0
+        return inter / len(a | b)
+
+    # Group representatives, their surfacing-window sets, and records.
+    reps: List[StructuralAnomaly] = []
+    surfaced_in: List[Set[int]] = []
     for w_idx, window_ix in enumerate(window_buckets):
         if not window_ix:
             continue
@@ -717,8 +1134,21 @@ def temporal_densest_anomalies(
             seed=seed + w_idx,
         )
         for a in window_anoms:
-            if any(a.members == s for s in seen):
-                continue
-            seen.append(a.members)
-            merged.append(a)
-    return merged
+            matched = False
+            for g_idx, rep in enumerate(reps):
+                if _jaccard(a.members, rep.members) >= match_threshold:
+                    surfaced_in[g_idx].add(w_idx)
+                    matched = True
+                    break
+            if not matched:
+                reps.append(a)
+                surfaced_in.append({w_idx})
+    for g_idx, rep in enumerate(reps):
+        rep.n_windows_surfaced = len(surfaced_in[g_idx])
+        rep.temporal_concentration = temporal_concentration(
+            interactions, rep.members, n_windows=n_windows
+        )
+        rep.temporal_persistence = cross_window_persistence(
+            interactions, rep.members, n_windows=n_windows
+        )
+    return reps

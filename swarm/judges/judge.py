@@ -16,7 +16,9 @@ and rationale. Backends:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import random
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,10 +44,14 @@ RUBRICS: dict[str, Path] = {
 }
 DEFAULT_RUBRIC_VERSION = "rubric.v3"
 
-# Back-compat: existing callers used RUBRIC_PATH / RUBRIC_VERSION as
-# module-level constants. Keep them pointing at v1 so they don't
-# silently start producing v2-scored results — explicit version flip
-# at the call site.
+# RUBRIC_PATH / RUBRIC_VERSION name v1 specifically. Arm B of the
+# calibration study is pre-registered to it (calibration-prereg.md), so it
+# needs a stable name that will not follow DEFAULT_RUBRIC_VERSION forward.
+# They are not defaults: a caller that wants the current rubric should say
+# nothing and get DEFAULT_RUBRIC_VERSION, and a caller that wants v1 should
+# name it. Judging on the wrong rubric is silent in the artifact — the
+# version is recorded faithfully next to a score the rubric did not produce —
+# which is the same failure MockJudge.score raises on for unknown versions.
 RUBRIC_PATH = RUBRICS["rubric.v1"]
 RUBRIC_VERSION = "rubric.v1"
 
@@ -71,7 +77,7 @@ class Judge(Protocol):
         """Return this judge's verdict for a single view."""
 
 
-def load_rubric(version: str = RUBRIC_VERSION) -> str:
+def load_rubric(version: str = DEFAULT_RUBRIC_VERSION) -> str:
     """Read a frozen rubric file by version.
 
     Defaults to v1 for back-compat with existing call sites. Pass an
@@ -85,7 +91,7 @@ def load_rubric(version: str = RUBRIC_VERSION) -> str:
     return RUBRICS[version].read_text()
 
 
-def rubric_path(version: str = RUBRIC_VERSION) -> Path:
+def rubric_path(version: str = DEFAULT_RUBRIC_VERSION) -> Path:
     """Path on disk for a given rubric version."""
     if version not in RUBRICS:
         raise KeyError(
@@ -108,7 +114,13 @@ class MockJudge:
     """
 
     name: str = "mock"
-    rubric_version: str = RUBRIC_VERSION  # defaults to v1 for back-compat
+    rubric_version: str = DEFAULT_RUBRIC_VERSION
+    # Seeded score jitter for inter-rater studies (arm C needs >=2 judges
+    # that do not agree perfectly). 0.0 = exact rubric scoring, unchanged
+    # behavior. Jitter is deterministic per (name, noise_seed, interaction_id)
+    # so runs stay reproducible from config alone.
+    noise_sigma: float = 0.0
+    noise_seed: int = 0
 
     def score(self, view: JudgeView) -> JudgeScore:
         payload = view.to_judge_payload()
@@ -127,6 +139,13 @@ class MockJudge:
                 "the unknown version on the JudgeScore, corrupting downstream "
                 "calibration artifacts."
             )
+        if self.noise_sigma > 0.0:
+            digest = hashlib.sha256(
+                f"{self.name}:{self.noise_seed}:{view.interaction_id}".encode()
+            ).hexdigest()
+            rng = random.Random(int(digest[:16], 16))
+            score = min(1.0, max(0.0, score + rng.gauss(0.0, self.noise_sigma)))
+            rationale = f"{rationale} [seeded jitter sigma={self.noise_sigma}]"
         return JudgeScore(
             interaction_id=view.interaction_id,
             judge_name=self.name,
@@ -431,8 +450,7 @@ def _extract_score(text: str) -> tuple[float, str]:
             score = float(m.group(1))
         except ValueError:
             score = float("nan")
-        if 0.0 <= score <= 1.0 or (not 0.0 <= score <= 1.0):
-            score = max(0.0, min(1.0, score))
+        score = max(0.0, min(1.0, score))
         rm = RATIONALE_PREFIX_RE.search(text)
         rationale = (rm.group(1) if rm else "").strip()
         if rationale:
@@ -451,7 +469,7 @@ class LLMJudge:
     """LLM-backed judge. Calls a real provider with the frozen rubric.
 
     Intentionally minimal — does not subclass BaseLLMAgent. The judge call
-    is a one-shot: rubric + payload → JSON response. Temperature is forced
+    is a one-shot: rubric + payload → JSON response. Temperature defaults
     to 0 for reproducibility per the rubric's "Determinism" section.
 
     Providers (matches the calibration pre-reg's requirement of three
@@ -461,8 +479,9 @@ class LLMJudge:
       - "openrouter" / "groq" / "together" / "deepseek" → call_openai_compatible
       - "ollama" → call_ollama  (local Llama-family)
 
-    The `caller` field is for tests — injecting a fake call function lets
-    us exercise the JSON-parsing + retry path without network.
+    The `caller` field is an injectable call function, useful for testing
+    (to exercise JSON-parsing + retry path without network) or other custom
+    call implementations.
     """
 
     name: str
@@ -474,7 +493,7 @@ class LLMJudge:
     max_tokens: int = 2048
     timeout: float = 60.0
     max_retries: int = 3
-    rubric_version: str = RUBRIC_VERSION
+    rubric_version: str = DEFAULT_RUBRIC_VERSION
     caller: Optional[Callable[[str], LLMCallResult]] = field(default=None, repr=False)
 
     def _build_prompt(self, view: JudgeView) -> str:

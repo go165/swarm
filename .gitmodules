@@ -1,0 +1,4 @@
+[submodule "beta-swarm"]
+	path = beta-swarm
+	url = https://github.com/swarm-ai-research/beta-swarm.git
+	branch = main

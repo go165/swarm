@@ -1,0 +1,62 @@
+# Artifact replay: a provenance-detached quality signal (bead iujo)
+#
+# Each accepted interaction publishes a receipt stamped with its soft label p.
+# Honest agents that trust receipts accept on max(trust, receipt p). The
+# replayers' own work is low quality, so their own receipts and trust are
+# poor; with replay on they present the best receipt they can see from someone
+# else, and the accept decision conditions on a p earned in another
+# interaction. quality_gap should fall without any agent misreporting itself.
+#
+# Arms (one lever at a time), swept by scripts/sweep_artifact_replay.py:
+#   control    replayers present nothing
+#   replay     replayers present foreign receipts; no lever
+#   binding    + artifact_context_binding_enabled (prevention, pre-accept)
+#   detection  + artifact_replay_detection_enabled (detection, post-accept)
+# Pre-registered prediction: docs/research/artifact-replay-prevention-vs-detection.md
+
+scenario_id: artifact_replay
+description: "Receipt replay laundering; context binding vs replay detection"
+motif: artifact_replay
+
+agents:
+  - type: honest
+    count: 6
+    config:
+      trust_artifacts: true
+      trust_weight: 1.0
+      acceptance_threshold: 0.6
+  - type: artifact_replayer
+    count: 2
+    config:
+      replay: true
+  # Same low-quality work, never replays, in every arm. Keeps a rejected pool
+  # so quality_gap is defined (it reads 0.0 when nothing is rejected).
+  - type: artifact_replayer
+    count: 1
+    config:
+      replay: false
+
+governance:
+  artifact_receipts_enabled: true
+  artifact_context_binding_enabled: false
+  artifact_replay_detection_enabled: false
+  # Pinned by the pre-registration; do not tune.
+  artifact_replay_detection_rate: 0.5
+  artifact_replay_false_positive_rate: 0.05
+  artifact_replay_penalty: 1.0
+
+simulation:
+  n_epochs: 20
+  steps_per_epoch: 10
+  seed: 42
+
+rate_limits:
+  interactions_per_step: 5
+
+payoff:
+  s_plus: 2.0
+  s_minus: 1.0
+  h: 2.0
+  theta: 0.5
+  rho_a: 0.1
+  rho_b: 0.1

@@ -29,6 +29,24 @@ class GovernanceConfig(BaseModel):
     min_stake_to_participate: float = 0.0
     stake_slash_rate: float = 0.1  # fraction slashed on violation
 
+    # What the stake is measured against (beads-p70u). Interaction payoffs
+    # land in AgentState.total_payoff, never in resources, so with the
+    # default "resources" every agent sits at its starting balance and the
+    # stake is a constant gate: it either never binds or blocks everyone.
+    #   "resources"         - current balance (default; governance and
+    #                         marketplace escrow are its only inputs)
+    #   "cumulative_payoff" - endowment plus earnings to date, so a
+    #                         persistently low-quality agent can fall below
+    #                         the bar. Earnings are included because a bare
+    #                         earnings gate blocks every agent at t=0, which
+    #                         is a deadlock: blocked agents cannot earn.
+    stake_basis: str = "resources"
+
+    # Credit interaction payoffs to AgentState.resources as they are earned
+    # (beads-p70u). Off by default: it changes the resource trajectory of
+    # every scenario, not only staking ones.
+    payoff_flows_to_resources: bool = False
+
     # Circuit breaker
     circuit_breaker_enabled: bool = False
     freeze_threshold_toxicity: float = 0.7
@@ -40,6 +58,14 @@ class GovernanceConfig(BaseModel):
     audit_probability: float = 0.1
     audit_penalty_multiplier: float = 2.0
     audit_threshold_p: float = 0.5
+
+    # Certificate gate (beads pins): with probability certificate_coverage,
+    # an interaction whose latent ground truth is recorded gets verified
+    # against it — unlike audits, which condition on the proxy p. A caught
+    # fabrication (ground_truth == -1) is penalized in cost and reputation.
+    certificate_gate_enabled: bool = False
+    certificate_coverage: float = 0.3
+    certificate_penalty: float = 1.5
 
     # Collusion detection
     collusion_detection_enabled: bool = False
@@ -180,6 +206,9 @@ class GovernanceConfig(BaseModel):
     # Loop detector
     loop_detector_enabled: bool = False
     loop_detector_quality_threshold: float = 0.4  # avg p threshold for quality loops
+    loop_detector_repetition_threshold: float = (
+        0.6  # proportion threshold for repetition loops
+    )
     loop_detector_tool_misuse_threshold: int = 5  # total tool misuse flags for loop
     loop_detector_rework_threshold: int = 10  # total rework count for loop
     loop_detector_penalty_multiplier: float = 1.5  # cost multiplier for loop detection
@@ -204,8 +233,12 @@ class GovernanceConfig(BaseModel):
 
     # Hardware trust rejection handling
     hardware_trust_enabled: bool = False
-    hardware_trust_propagation_enabled: bool = True  # Propagate stop token to dependents
-    hardware_trust_recovery_max_steps: int = 10  # Max steps in constrained recovery mode
+    hardware_trust_propagation_enabled: bool = (
+        True  # Propagate stop token to dependents
+    )
+    hardware_trust_recovery_max_steps: int = (
+        10  # Max steps in constrained recovery mode
+    )
 
     # Diversity as Defense (DaD)
     diversity_enabled: bool = False
@@ -225,6 +258,12 @@ class GovernanceConfig(BaseModel):
     diversity_audit_cost: float = 0.1  # Cost applied when disagreement triggers audit
     diversity_correlation_window: int = (
         50  # Window of recent interactions for correlation
+    )
+    diversity_consensus_z: float = (
+        1.96  # z for the Wilson bound on consensus evidence (Rule 5)
+    )
+    diversity_min_effective_n: float = (
+        2.0  # Effective-N quorum floor: below this, consensus is not evidence
     )
 
     # Resample protocol (Bhatt et al., 2025 — "Ctrl-Z")
@@ -248,6 +287,17 @@ class GovernanceConfig(BaseModel):
     cascade_risk_p_threshold: float = 0.3  # Descendants below this p are "bad"
     cascade_risk_window: int = 200  # Rolling interaction window for DAG analysis
 
+    # Artifact replay (bead iujo): receipts carry an interaction's p; binding
+    # (prevention) refuses a receipt presented by anyone but its producer
+    # before acceptance; the detector (detection) penalizes caught replays
+    # after acceptance, with a false-positive rate on other interactions.
+    artifact_receipts_enabled: bool = False
+    artifact_context_binding_enabled: bool = False
+    artifact_replay_detection_enabled: bool = False
+    artifact_replay_detection_rate: float = 0.5
+    artifact_replay_false_positive_rate: float = 0.05
+    artifact_replay_penalty: float = 1.0
+
     @model_validator(mode="after")
     def _run_validation(self) -> "GovernanceConfig":
         self._check_values()
@@ -269,6 +319,8 @@ class GovernanceConfig(BaseModel):
             raise ValueError("min_stake_to_participate must be non-negative")
         if not 0.0 <= self.stake_slash_rate <= 1.0:
             raise ValueError("stake_slash_rate must be in [0, 1]")
+        if self.stake_basis not in ("resources", "cumulative_payoff"):
+            raise ValueError("stake_basis must be 'resources' or 'cumulative_payoff'")
         if not 0.0 <= self.freeze_threshold_toxicity <= 1.0:
             raise ValueError("freeze_threshold_toxicity must be in [0, 1]")
         if self.freeze_threshold_violations < 1:
@@ -281,6 +333,10 @@ class GovernanceConfig(BaseModel):
             raise ValueError("audit_penalty_multiplier must be non-negative")
         if not 0.0 <= self.audit_threshold_p <= 1.0:
             raise ValueError("audit_threshold_p must be in [0, 1]")
+        if not 0.0 <= self.certificate_coverage <= 1.0:
+            raise ValueError("certificate_coverage must be in [0, 1]")
+        if self.certificate_penalty < 0:
+            raise ValueError("certificate_penalty must be non-negative")
         if self.collusion_frequency_threshold <= 0:
             raise ValueError("collusion_frequency_threshold must be positive")
         if not 0.0 <= self.collusion_correlation_threshold <= 1.0:
@@ -333,13 +389,9 @@ class GovernanceConfig(BaseModel):
         if self.adaptive_controller_evidence_window < 1:
             raise ValueError("adaptive_controller_evidence_window must be >= 1")
         if self.adaptive_controller_contemplation_interval < 1:
-            raise ValueError(
-                "adaptive_controller_contemplation_interval must be >= 1"
-            )
+            raise ValueError("adaptive_controller_contemplation_interval must be >= 1")
         if self.adaptive_controller_min_evidence_epochs < 1:
-            raise ValueError(
-                "adaptive_controller_min_evidence_epochs must be >= 1"
-            )
+            raise ValueError("adaptive_controller_min_evidence_epochs must be >= 1")
         if not 0.0 <= self.adaptive_controller_confidence_threshold <= 1.0:
             raise ValueError(
                 "adaptive_controller_confidence_threshold must be in [0, 1]"
@@ -353,9 +405,7 @@ class GovernanceConfig(BaseModel):
                 "adaptive_controller_max_degradation_tolerance must be non-negative"
             )
         if self.adaptive_controller_max_active_proposals < 1:
-            raise ValueError(
-                "adaptive_controller_max_active_proposals must be >= 1"
-            )
+            raise ValueError("adaptive_controller_max_active_proposals must be >= 1")
 
         # Memory tier governance validation
         if not 0.0 <= self.memory_promotion_min_quality <= 1.0:
@@ -422,17 +472,11 @@ class GovernanceConfig(BaseModel):
         if self.self_evolution_max_tools < 1:
             raise ValueError("self_evolution_max_tools must be >= 1")
         if not 0.0 <= self.self_evolution_divergence_threshold <= 1.0:
-            raise ValueError(
-                "self_evolution_divergence_threshold must be in [0, 1]"
-            )
+            raise ValueError("self_evolution_divergence_threshold must be in [0, 1]")
         if not 0.0 <= self.self_evolution_tool_risk_threshold <= 1.0:
-            raise ValueError(
-                "self_evolution_tool_risk_threshold must be in [0, 1]"
-            )
+            raise ValueError("self_evolution_tool_risk_threshold must be in [0, 1]")
         if self.self_evolution_growth_freeze_duration < 1:
-            raise ValueError(
-                "self_evolution_growth_freeze_duration must be >= 1"
-            )
+            raise ValueError("self_evolution_growth_freeze_duration must be >= 1")
 
         # Self-modification governance validation
         if self.self_modification_max_per_epoch < 1:
@@ -453,6 +497,8 @@ class GovernanceConfig(BaseModel):
         # Loop detector validation
         if not 0.0 <= self.loop_detector_quality_threshold <= 1.0:
             raise ValueError("loop_detector_quality_threshold must be in [0, 1]")
+        if not 0.0 <= self.loop_detector_repetition_threshold <= 1.0:
+            raise ValueError("loop_detector_repetition_threshold must be in [0, 1]")
         if self.loop_detector_tool_misuse_threshold < 0:
             raise ValueError("loop_detector_tool_misuse_threshold must be non-negative")
         if self.loop_detector_rework_threshold < 0:
@@ -501,6 +547,10 @@ class GovernanceConfig(BaseModel):
             raise ValueError("diversity_audit_cost must be non-negative")
         if self.diversity_correlation_window < 1:
             raise ValueError("diversity_correlation_window must be >= 1")
+        if self.diversity_consensus_z <= 0:
+            raise ValueError("diversity_consensus_z must be positive")
+        if self.diversity_min_effective_n < 0:
+            raise ValueError("diversity_min_effective_n must be non-negative")
 
         # Resample protocol validation
         if not 0.0 <= self.resample_suspicion_threshold <= 1.0:
@@ -528,3 +578,9 @@ class GovernanceConfig(BaseModel):
             raise ValueError("cascade_risk_p_threshold must be in [0, 1]")
         if self.cascade_risk_window < 1:
             raise ValueError("cascade_risk_window must be >= 1")
+        if not 0.0 <= self.artifact_replay_detection_rate <= 1.0:
+            raise ValueError("artifact_replay_detection_rate must be in [0, 1]")
+        if not 0.0 <= self.artifact_replay_false_positive_rate <= 1.0:
+            raise ValueError("artifact_replay_false_positive_rate must be in [0, 1]")
+        if self.artifact_replay_penalty < 0:
+            raise ValueError("artifact_replay_penalty must be non-negative")

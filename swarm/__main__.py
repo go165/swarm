@@ -1,11 +1,11 @@
 """CLI entry point for the distributional-agi-safety framework.
 
 Usage:
-    python -m src run scenarios/baseline.yaml
-    python -m src run scenarios/baseline.yaml --seed 42 --epochs 20
-    python -m src run scenarios/baseline.yaml --export-json results.json
-    python -m src run scenarios/baseline.yaml --export-csv output/
-    python -m src list
+    python -m swarm run scenarios/baseline.yaml
+    python -m swarm run scenarios/baseline.yaml --seed 42 --epochs 20
+    python -m swarm run scenarios/baseline.yaml --export-json results.json
+    python -m swarm run scenarios/baseline.yaml --export-csv output/
+    python -m swarm list
 """
 
 import argparse
@@ -181,11 +181,22 @@ def cmd_run(args: argparse.Namespace) -> int:
             agent_states = orchestrator.state.agents
             frozen = orchestrator.state.frozen_agents
             quarantined = getattr(orchestrator.state, 'quarantined_agents', set())
+            # Get memory handler snapshot if available
+            memory_snapshot = None
+            memory_handler = getattr(orchestrator, '_memory_handler', None)
+            if memory_handler and hasattr(memory_handler, 'epoch_snapshots'):
+                epoch_idx = epoch_metrics.epoch
+                if epoch_idx < len(memory_handler.epoch_snapshots):
+                    mem_snap = memory_handler.epoch_snapshots[epoch_idx]
+                    memory_snapshot = {
+                        "followup_side_write_fraction": mem_snap.get("followup_side_write_fraction", 0.0)
+                    }
             aggregator.finalize_epoch(
                 epoch=epoch_metrics.epoch,
                 agent_states=agent_states,
                 frozen_agents=frozen,
                 quarantined_agents=quarantined,
+                memory_snapshot=memory_snapshot,
             )
 
         orchestrator.on_epoch_end(_on_epoch_end)
@@ -689,7 +700,7 @@ def _agentrxiv_status(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m src",
+        prog="python -m swarm",
         description="Distributional AGI Safety Sandbox",
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -877,6 +888,46 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    # Sanitized, opt-out telemetry envelope around command dispatch. Best-effort
+    # and PII-free (see swarm/telemetry.py); SWARM_TELEMETRY=off disables it.
+    import sys
+    import time
+
+    from swarm.telemetry import sanitize_command, track
+
+    subcommand = args.command or "help"
+    track(
+        "Command Invoked",
+        {"subcommand": subcommand, "command": sanitize_command(sys.argv, subcommand)},
+    )
+    started = time.monotonic()
+    try:
+        exit_code = _dispatch(args, parser, sandbox_parser, arxiv_parser)
+    except Exception as exc:
+        track(
+            "Command Error",
+            {"subcommand": subcommand, "error_type": type(exc).__name__},
+            is_error=True,
+        )
+        raise
+    track(
+        "Command Completed",
+        {
+            "subcommand": subcommand,
+            "exit_code": exit_code,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+        },
+    )
+    return exit_code
+
+
+def _dispatch(
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    sandbox_parser: argparse.ArgumentParser,
+    arxiv_parser: argparse.ArgumentParser,
+) -> int:
+    """Route a parsed command to its handler, returning the process exit code."""
     if args.command == "run":
         return cmd_run(args)
     elif args.command == "evolve":

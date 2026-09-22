@@ -10,12 +10,95 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install ruff
       - run: ruff check swarm/ tests/
+
+  # Every other job installs `.[dev,runtime,api,analysis,gamescape]`, so a
+  # runtime import declared only in an extra looks fine forever. That is how
+  # scipy — imported at module level by swarm/detection/stats.py — sat in the
+  # `analysis` extra unnoticed until bead cqis: `pip install swarm-safety`
+  # produced a package whose detection module would not import.
+  # This job installs the bare package and imports the core surface.
+  core-import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install with NO extras
+        run: python -m pip install -e .
+      - name: Core modules must import
+        run: |
+          python - <<'PY'
+          import importlib
+          CORE = [
+              "swarm",
+              "swarm.__main__",
+              "swarm.core.proxy",
+              "swarm.core.payoff",
+              "swarm.metrics.soft_metrics",
+              "swarm.metrics.reporters",
+              "swarm.detection.stats",
+              "swarm.logging.event_log",
+          ]
+          failed = []
+          for m in CORE:
+              try:
+                  importlib.import_module(m)
+              except Exception as e:
+                  failed.append(f"{m}: {type(e).__name__}: {e}")
+          if failed:
+              print("Core modules that do not import without extras:")
+              for f in failed:
+                  print("  " + f)
+              print()
+              print("Either add the missing package to [project] dependencies, or")
+              print("make the import lazy if the module is genuinely optional.")
+              raise SystemExit(1)
+          print(f"all {len(CORE)} core modules import with no extras installed")
+          PY
+
+  # The Next.js viz app had no CI at all: a red lint, type, or build error
+  # (e.g. the use-media-query set-state-in-effect breakage) reached main
+  # unnoticed. Warnings don't fail the job; errors do.
+  viz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: viz
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: viz/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npx tsc --noEmit
+      - run: npm run build
+
+  invariants:
+    # INVARIANTS.md must map every declared invariant to a pytest node that
+    # collects — an invariant without a running test is prose, not an
+    # invariant. See scripts/check_invariants.py.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # Mirror the test job's extras: the checker collects the referenced
+      # test nodes, so it needs every import those tests pull in (analysis
+      # brings matplotlib for governance_arena — first run failed without it).
+      - run: python -m pip install -e ".[dev,runtime,api,analysis,gamescape]"
+      - run: python scripts/check_invariants.py
 
   kb-graph-check:
     # Fails on (a) any orphan page (no inbound links) not in .kb-graph-orphans,
@@ -26,8 +109,8 @@ jobs:
     #   python scripts/build_kb_graph.py --update-baseline
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install pyyaml
@@ -36,8 +119,8 @@ jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[dev,runtime]"
@@ -56,14 +139,14 @@ jobs:
           - python-version: "3.12"
             mode: full
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[dev,runtime,api,analysis,gamescape]"
       - run: echo "Running pytest in ${{ matrix.mode }} mode on Python ${{ matrix.python-version }}."
       - name: Download testmon data (best effort)
-        uses: dawidd6/action-download-artifact@v21
+        uses: dawidd6/action-download-artifact@v24
         with:
           workflow: ci.yml
           branch: main
@@ -72,16 +155,16 @@ jobs:
           if_no_artifact_found: ignore
       - name: Record testmon metadata (no coverage)
         if: github.ref == 'refs/heads/main' && matrix.mode == 'full'
-        run: python scripts/test_changes.py --full -- pytest tests/ -v -n auto --dist=loadfile --timeout=300 --durations=20 --durations-min=1.0 -p no:pytest_cov
+        run: python scripts/test_changes.py --full -- pytest tests/ -v -n auto --dist=loadfile --timeout=300 --timeout-method=thread --durations=20 --durations-min=1.0 -p no:pytest_cov -m "not perf"
       - name: Ensure testmon data exists
         if: github.ref == 'refs/heads/main' && matrix.mode == 'full'
         run: test -f .testmondata
       - name: Run compatibility smoke tests
         if: matrix.mode == 'compatibility'
-        run: python scripts/test_changes.py -- pytest tests/ -v -n auto --dist=loadfile --timeout=300 --durations=20 --durations-min=1.0 -p no:pytest_cov
+        run: python scripts/test_changes.py -- pytest tests/ -v -n auto --dist=loadfile --timeout=300 --timeout-method=thread --durations=20 --durations-min=1.0 -p no:pytest_cov -m "not perf"
       - name: Run full tests with coverage
         if: matrix.mode == 'full'
-        run: pytest tests/ -v -n auto --dist=loadfile --timeout=300 --durations=20 --durations-min=1.0 --cov=swarm --cov-report=term-missing --cov-fail-under=70 -p no:testmon -m "not perf"
+        run: pytest tests/ -v -n auto --dist=loadfile --timeout=300 --timeout-method=thread --durations=20 --durations-min=1.0 --cov=swarm --cov-report=term-missing --cov-fail-under=70 -p no:testmon -m "not perf"
       # Wall-clock budget tests run serially and without coverage: the coverage
       # tracer and xdist parallelism inflate timing 5-20×, causing false failures
       # unrelated to real regressions. See the `perf` marker in pyproject.toml.
@@ -103,6 +186,46 @@ jobs:
           path: .testmondata
           if-no-files-found: ignore
 
+  # Enforce the CI-owned AgentGit policy (.github/agentgit.policy.yaml) against
+  # every provenance bundle committed under .agentgit/. Bundles record what an
+  # agent actually did (signed diff facts); the gate judges those facts against
+  # the org policy, independent of whatever policy the agent self-attested
+  # with. No committed bundles -> pass (most PRs are human/local-session work).
+  # The pytest result is CI-authoritative: it comes from the `test` job, never
+  # from the bundle's self-attested checks. Fails closed on a missing
+  # AGENTGIT_SIGNING_KEY secret or an unverifiable bundle.
+  agentgit-gate:
+    if: always()
+    needs: [test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e .
+      - name: Gate committed provenance bundles
+        env:
+          AGENTGIT_SIGNING_KEY: ${{ secrets.AGENTGIT_SIGNING_KEY }}
+          PYTEST_RESULT: ${{ needs.test.result }}
+        run: |
+          bundles=$(git ls-files '.agentgit/*.json' '.agentgit/**/*.json')
+          if [ -z "$bundles" ]; then
+            echo "no committed provenance bundles to gate"
+            exit 0
+          fi
+          check="fail"
+          [ "$PYTEST_RESULT" = "success" ] && check="pass"
+          rc=0
+          for bundle in $bundles; do
+            python -m swarm.agentgit gate \
+              --bundle "$bundle" \
+              --policy .github/agentgit.policy.yaml \
+              --check "pytest=$check" || rc=1
+          done
+          exit $rc
+
   # Render-verify JS-bearing docs pages: build the static site, serve it, and
   # confirm the dashboards actually render in a headless browser. HTTP 200 is
   # not proof a page works — curl/WebFetch don't run JS. This gate would have
@@ -111,8 +234,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+        with:
+          # Full history so git-revision-date-localized resolves accurate
+          # "last updated" dates instead of falling back to the build date.
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install image libs for mkdocs-material social cards
@@ -121,18 +248,26 @@ jobs:
           sudo apt-get install -y \
             libcairo2-dev libfreetype6-dev libffi-dev libjpeg-dev libpng-dev libz-dev pngquant
       - name: Install docs build deps
+        # git-revision-date-localized pinned <1.6 (bead ggai): 1.6.0, released
+        # 2026-09-14, emits its "First revision timestamp is older than last"
+        # warning despite `strict: false` in mkdocs.yml, so `--strict` aborts on
+        # every run. Unpin once a release honours the plugin's own strict flag
+        # again (check: this job goes green with the pin removed).
         run: |
           python -m pip install \
             "mkdocs-material[imaging]" \
             "mkdocstrings[python]" \
             pymdown-extensions \
-            mkdocs-git-revision-date-localized-plugin \
+            "mkdocs-git-revision-date-localized-plugin<1.6" \
             mkdocs-rss-plugin
       - name: Build static site
-        # No --strict: pre-existing broken image links in papers/ are tolerated.
-        # The committed docs/bridges/gitlawb_snapshot.json is copied into site/,
-        # so the dashboard's same-origin backfill works without network access.
-        run: mkdocs build
+        # --strict gates on broken internal links and nav regressions. The
+        # git-revision-date plugin's git-history warnings are decoupled via its
+        # own `strict: false` (see mkdocs.yml), so only real link/nav breakage
+        # fails the build. The committed docs/bridges/gitlawb_snapshot.json is
+        # copied into site/, so the dashboard's same-origin backfill works
+        # without network access.
+        run: mkdocs build --strict
       - name: Serve built site
         run: |
           python -m http.server 8000 --directory site &> /tmp/http.log &
@@ -159,13 +294,17 @@ jobs:
   # Add "quality-gate" as a required check in GitHub branch protection.
   quality-gate:
     if: always()
-    needs: [lint, kb-graph-check, type-check, test, render-verify]
+    needs: [lint, core-import, invariants, kb-graph-check, type-check, test, agentgit-gate, render-verify]
     runs-on: ubuntu-latest
     steps:
       - name: Check all jobs passed
         run: |
           if [[ "${{ needs.lint.result }}" != "success" ]]; then
             echo "::error::Lint failed"
+            exit 1
+          fi
+          if [[ "${{ needs.invariants.result }}" != "success" ]]; then
+            echo "::error::Invariant manifest check failed (INVARIANTS.md maps an invariant to no test, or a referenced test no longer collects)"
             exit 1
           fi
           if [[ "${{ needs.kb-graph-check.result }}" != "success" ]]; then
@@ -180,8 +319,59 @@ jobs:
             echo "::error::Tests failed"
             exit 1
           fi
+          if [[ "${{ needs.agentgit-gate.result }}" != "success" ]]; then
+            echo "::error::AgentGit gate failed (a committed provenance bundle violates .github/agentgit.policy.yaml)"
+            exit 1
+          fi
           if [[ "${{ needs.render-verify.result }}" != "success" ]]; then
             echo "::error::Render-verify failed (a JS docs page is broken)"
             exit 1
           fi
           echo "All quality gates passed"
+
+  # Direct pushes to main bypass the branch-protection gate by design
+  # (parallel multi-session merges — see project memory: strict checks
+  # intentionally off). This job is the compensating control: a red main
+  # becomes a GitHub issue within minutes instead of a silently ignored
+  # red X on the commit list. Closes the loop that made the gate
+  # ignorable (beads k8am).
+  alert-main-failure:
+    if: failure() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [quality-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const sha = context.sha.substring(0, 8);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = "CI red on main";
+            const body = `Quality gate failed on direct push \`${sha}\`.\n\n` +
+              `Run: ${runUrl}\n\n` +
+              `Direct pushes bypass the PR gate by design; this issue is the ` +
+              `pager. Fix or revert, then close. (beads k8am)`;
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: "ci-red-main", color: "b60205",
+                description: "Quality gate failed on a direct push to main",
+              });
+            } catch (e) { /* 422 = already exists */ }
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: "open", labels: "ci-red-main",
+            });
+            if (open.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: open.data[0].number,
+                body: `Still red at \`${sha}\`: ${runUrl}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ["ci-red-main"],
+              });
+            }

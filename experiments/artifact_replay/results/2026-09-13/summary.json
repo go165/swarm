@@ -1,0 +1,185 @@
+{
+  "scenario": "scenarios/artifact_replay.yaml",
+  "seeds": [
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51
+  ],
+  "arms": {
+    "control": {
+      "avg_quality_gap": {
+        "mean": 0.1814743777071299,
+        "sd": 0.01686118379763117
+      },
+      "avg_toxicity": {
+        "mean": 0.4070702399698343,
+        "sd": 0.015906319800456238
+      },
+      "total_welfare": {
+        "mean": 158.6054836666097,
+        "sd": 7.163719845592243
+      },
+      "accepted_interactions": {
+        "mean": 270.6,
+        "sd": 28.480792748018015
+      },
+      "replay_presented": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "replay_accepted": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "presentations_blocked": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "caught_replays": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "false_positives": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "degenerate_gap_epochs": {
+        "mean": 0.0,
+        "sd": 0.0
+      }
+    },
+    "replay": {
+      "avg_quality_gap": {
+        "mean": 0.09461935997130697,
+        "sd": 0.020374271710517918
+      },
+      "avg_toxicity": {
+        "mean": 0.4805441996349916,
+        "sd": 0.005838647610127181
+      },
+      "total_welfare": {
+        "mean": 158.42380474025828,
+        "sd": 7.9000282009887535
+      },
+      "accepted_interactions": {
+        "mean": 432.3,
+        "sd": 23.16151021750429
+      },
+      "replay_presented": {
+        "mean": 242.2,
+        "sd": 11.013123484683575
+      },
+      "replay_accepted": {
+        "mean": 241.8,
+        "sd": 11.003029885748138
+      },
+      "presentations_blocked": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "caught_replays": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "false_positives": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "degenerate_gap_epochs": {
+        "mean": 2.7,
+        "sd": 2.94580681270476
+      }
+    },
+    "binding": {
+      "avg_quality_gap": {
+        "mean": 0.1814743777071299,
+        "sd": 0.01686118379763117
+      },
+      "avg_toxicity": {
+        "mean": 0.4070702399698343,
+        "sd": 0.015906319800456238
+      },
+      "total_welfare": {
+        "mean": 158.6054836666097,
+        "sd": 7.163719845592243
+      },
+      "accepted_interactions": {
+        "mean": 270.6,
+        "sd": 28.480792748018015
+      },
+      "replay_presented": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "replay_accepted": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "presentations_blocked": {
+        "mean": 242.2,
+        "sd": 11.013123484683575
+      },
+      "caught_replays": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "false_positives": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "degenerate_gap_epochs": {
+        "mean": 0.0,
+        "sd": 0.0
+      }
+    },
+    "detection": {
+      "avg_quality_gap": {
+        "mean": 0.10146877698130805,
+        "sd": 0.011940990749415091
+      },
+      "avg_toxicity": {
+        "mean": 0.4824989483397077,
+        "sd": 0.003945325313781986
+      },
+      "total_welfare": {
+        "mean": 22.632312462809054,
+        "sd": 11.305594080519917
+      },
+      "accepted_interactions": {
+        "mean": 425.0,
+        "sd": 13.944333775567927
+      },
+      "replay_presented": {
+        "mean": 242.2,
+        "sd": 11.013123484683575
+      },
+      "replay_accepted": {
+        "mean": 241.8,
+        "sd": 11.003029885748138
+      },
+      "presentations_blocked": {
+        "mean": 0.0,
+        "sd": 0.0
+      },
+      "caught_replays": {
+        "mean": 119.7,
+        "sd": 11.96337001944779
+      },
+      "false_positives": {
+        "mean": 11.0,
+        "sd": 3.4318767136623336
+      },
+      "degenerate_gap_epochs": {
+        "mean": 1.1,
+        "sd": 2.1317702607092643
+      }
+    }
+  }
+}

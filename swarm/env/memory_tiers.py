@@ -11,7 +11,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 class MemoryTier(Enum):
@@ -73,9 +73,16 @@ class MemoryStore:
     Provides write, promote, search, hot cache, and compaction operations.
     """
 
-    def __init__(self, seed: Optional[int] = None) -> None:
+    VALID_RANKINGS = ("quality", "recency", "engagement")
+
+    def __init__(self, seed: Optional[int] = None, ranking: str = "quality") -> None:
+        if ranking not in self.VALID_RANKINGS:
+            raise ValueError(
+                f"ranking must be one of {self.VALID_RANKINGS}, got {ranking!r}"
+            )
         self._entries: Dict[str, MemoryEntry] = {}
         self._rng = random.Random(seed)
+        self._ranking = ranking
         self._lock = threading.Lock()
 
         # Hot cache: top-K entries from Tier 3 rebuilt at epoch start
@@ -124,25 +131,25 @@ class MemoryStore:
         self,
         entry_id: str,
         promoter_id: str,
-    ) -> bool:
+    ) -> Optional["MemoryEntry"]:
         """Attempt to promote an entry to the next tier.
 
         Ephemeral -> Structured -> Graph.
-        Returns True if promotion succeeded.
+        Returns the promoted copy if promotion succeeded, else None.
         """
         with self._lock:
             entry = self._entries.get(entry_id)
             if entry is None:
-                return False
+                return None
             if entry.status == MemoryEntryStatus.REVERTED:
-                return False
+                return None
 
             if entry.tier == MemoryTier.EPHEMERAL:
                 target = MemoryTier.STRUCTURED
             elif entry.tier == MemoryTier.STRUCTURED:
                 target = MemoryTier.GRAPH
             else:
-                return False  # Already at top tier
+                return None  # Already at top tier
 
             entry.status = MemoryEntryStatus.PENDING_PROMOTION
             # Create promoted copy at new tier
@@ -160,6 +167,22 @@ class MemoryStore:
             )
             self._entries[promoted.entry_id] = promoted
             entry.status = MemoryEntryStatus.PROMOTED
+            return promoted
+
+    def cancel_promotion(self, promoted_entry_id: str) -> bool:
+        """Undo a promotion: revert the promoted copy, reactivate the source.
+
+        Used by governance when a promotion is blocked after the fact.
+        """
+        with self._lock:
+            promoted = self._entries.get(promoted_entry_id)
+            if promoted is None:
+                return False
+            promoted.status = MemoryEntryStatus.REVERTED
+            if promoted.promoted_from:
+                source = self._entries.get(promoted.promoted_from)
+                if source is not None and source.status == MemoryEntryStatus.PROMOTED:
+                    source.status = MemoryEntryStatus.ACTIVE
             return True
 
     # ------------------------------------------------------------------
@@ -168,14 +191,15 @@ class MemoryStore:
 
     def verify(self, entry_id: str, verifier_id: str) -> bool:
         """Add a verification to an entry. Returns True if entry exists."""
-        entry = self._entries.get(entry_id)
-        if entry is None:
-            return False
-        if verifier_id == entry.author_id:
-            return False  # Cannot self-verify
-        if verifier_id not in entry.verified_by:
-            entry.verified_by.append(verifier_id)
-        return True
+        with self._lock:
+            entry = self._entries.get(entry_id)
+            if entry is None:
+                return False
+            if verifier_id == entry.author_id:
+                return False  # Cannot self-verify
+            if verifier_id not in entry.verified_by:
+                entry.verified_by.append(verifier_id)
+            return True
 
     # ------------------------------------------------------------------
     # Challenge / Revert
@@ -226,15 +250,9 @@ class MemoryStore:
                     results.append(entry)
                     seen_ids.add(entry.entry_id)
 
-            for entry in self._entries.values():
-                if (
-                    entry.entry_id not in seen_ids
-                    and entry.tier == MemoryTier.EPHEMERAL
-                    and entry.status == MemoryEntryStatus.ACTIVE
-                    and query_lower in entry.content.lower()
-                ):
-                    results.append(entry)
-                    seen_ids.add(entry.entry_id)
+            self._collect_tier_matches(
+                MemoryTier.EPHEMERAL, query_lower, results, seen_ids
+            )
 
             # Check if Tier 1 is sufficient (~80% of queries)
             if len(results) >= limit:
@@ -242,33 +260,39 @@ class MemoryStore:
                 return results[:limit]
 
             # Tier 2: structured entries
-            for entry in self._entries.values():
-                if (
-                    entry.entry_id not in seen_ids
-                    and entry.tier == MemoryTier.STRUCTURED
-                    and entry.status == MemoryEntryStatus.ACTIVE
-                    and query_lower in entry.content.lower()
-                ):
-                    results.append(entry)
-                    seen_ids.add(entry.entry_id)
+            self._collect_tier_matches(
+                MemoryTier.STRUCTURED, query_lower, results, seen_ids
+            )
 
             if len(results) >= limit:
                 self._record_search_hit(agent_id, len(results))
                 return results[:limit]
 
             # Tier 3: graph entries
-            for entry in self._entries.values():
-                if (
-                    entry.entry_id not in seen_ids
-                    and entry.tier == MemoryTier.GRAPH
-                    and entry.status == MemoryEntryStatus.ACTIVE
-                    and query_lower in entry.content.lower()
-                ):
-                    results.append(entry)
-                    seen_ids.add(entry.entry_id)
+            self._collect_tier_matches(
+                MemoryTier.GRAPH, query_lower, results, seen_ids
+            )
 
             self._record_search_hit(agent_id, len(results))
             return results[:limit]
+
+    def _collect_tier_matches(
+        self,
+        tier: MemoryTier,
+        query_lower: str,
+        results: List[MemoryEntry],
+        seen_ids: Set[str],
+    ) -> None:
+        """Append active entries of `tier` matching the query to results."""
+        for entry in self._entries.values():
+            if (
+                entry.entry_id not in seen_ids
+                and entry.tier == tier
+                and entry.status == MemoryEntryStatus.ACTIVE
+                and query_lower in entry.content.lower()
+            ):
+                results.append(entry)
+                seen_ids.add(entry.entry_id)
 
     def _record_search_hit(self, agent_id: str, count: int) -> None:
         self._search_hits[agent_id] = self._search_hits.get(agent_id, 0) + count
@@ -278,18 +302,29 @@ class MemoryStore:
     # ------------------------------------------------------------------
 
     def rebuild_hot_cache(self) -> List[MemoryEntry]:
-        """Rebuild hot cache from top Tier 3 entries by quality + read count."""
+        """Rebuild hot cache from top Tier 3 entries per the ranking policy.
+
+        Cache membership counts as broadcast exposure (every agent observes
+        the cache), so members gain a read on each rebuild — under the
+        "engagement" ranking this produces the rich-get-richer feedback loop
+        characteristic of engagement-ranked feeds.
+        """
         with self._lock:
             graph_entries = [
                 e
                 for e in self._entries.values()
                 if e.tier == MemoryTier.GRAPH and e.status == MemoryEntryStatus.ACTIVE
             ]
-            graph_entries.sort(
-                key=lambda e: (e.quality_score, e.read_count),
-                reverse=True,
-            )
+            if self._ranking == "recency":
+                key = lambda e: (e.created_epoch, e.created_step)  # noqa: E731
+            elif self._ranking == "engagement":
+                key = lambda e: (e.read_count, e.quality_score)  # noqa: E731
+            else:  # quality
+                key = lambda e: (e.quality_score, e.read_count)  # noqa: E731
+            graph_entries.sort(key=key, reverse=True)
             self._hot_cache = graph_entries[: self._hot_cache_size]
+            for e in self._hot_cache:
+                e.read_count += 1
             return list(self._hot_cache)
 
     @property
@@ -317,6 +352,14 @@ class MemoryStore:
             del self._entries[eid]
         return len(to_remove)
 
+    def remove_entry(self, entry_id: str) -> bool:
+        """Delete an entry outright (a moderator sweep). Returns True if found."""
+        with self._lock:
+            if self._entries.pop(entry_id, None) is None:
+                return False
+            self._hot_cache = [e for e in self._hot_cache if e.entry_id != entry_id]
+            return True
+
     # ------------------------------------------------------------------
     # Epoch lifecycle
     # ------------------------------------------------------------------
@@ -340,14 +383,21 @@ class MemoryStore:
         return [e for e in self._entries.values() if e.author_id == author_id]
 
     def get_pending_promotions(self) -> List[MemoryEntry]:
-        """Entries at Tier 1/2 with enough verifications for promotion consideration."""
-        return [
+        """Active Tier 1/2 entries eligible for verification and promotion.
+
+        Includes unverified entries — verification bootstraps from this list,
+        so requiring a prior verification here would deadlock the pipeline
+        (nothing could ever receive its first verification). Newest first, so
+        fresh writes surface within observation caps.
+        """
+        entries = [
             e
             for e in self._entries.values()
             if e.status == MemoryEntryStatus.ACTIVE
             and e.tier in (MemoryTier.EPHEMERAL, MemoryTier.STRUCTURED)
-            and len(e.verified_by) > 0
         ]
+        entries.sort(key=lambda e: (e.created_epoch, e.created_step), reverse=True)
+        return entries
 
     def get_challenged_entries(self) -> List[MemoryEntry]:
         return [

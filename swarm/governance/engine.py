@@ -5,9 +5,15 @@ from typing import Any, Dict, List, Optional, Set
 
 from swarm.env.state import EnvState
 from swarm.governance.admission import StakingLever
+from swarm.governance.artifact_replay import (
+    ArtifactContextBindingLever,
+    ArtifactReceiptLever,
+    ArtifactReplayDetectorLever,
+)
 from swarm.governance.attestation_heartbeat import AttestationHeartbeatLever
 from swarm.governance.audits import RandomAuditLever
 from swarm.governance.cascade import CascadeRiskLever
+from swarm.governance.certificate_gate import CertificateGateLever
 from swarm.governance.circuit_breaker import CircuitBreakerLever
 from swarm.governance.collusion import CollusionPenaltyLever
 from swarm.governance.config import GovernanceConfig
@@ -126,6 +132,10 @@ class GovernanceEngine:
             StakingLever(self.config),
             CircuitBreakerLever(self.config),
             RandomAuditLever(self.config, seed=seed),
+            CertificateGateLever(
+                self.config,
+                seed=None if seed is None else seed + 6007,
+            ),
             CollusionPenaltyLever(self.config),
             SecurityLever(self.config, seed=seed),
             PairCapLever(self.config),
@@ -189,6 +199,17 @@ class GovernanceEngine:
         # Cascade risk lever (artifact chain governance)
         if self.config.cascade_risk_enabled:
             levers.append(CascadeRiskLever(self.config))
+        # Artifact replay levers (bead iujo); binding acts pre-accept via
+        # screen_artifact_presentation rather than on_interaction.
+        if self.config.artifact_receipts_enabled:
+            levers.append(ArtifactReceiptLever(self.config))
+        self._artifact_binding: Optional[ArtifactContextBindingLever] = (
+            ArtifactContextBindingLever(self.config)
+            if self.config.artifact_context_binding_enabled
+            else None
+        )
+        if self.config.artifact_replay_detection_enabled:
+            levers.append(ArtifactReplayDetectorLever(self.config, seed=seed))
 
         # Stored as a tuple so that external code cannot mutate in place.
         self._levers: tuple[GovernanceLever, ...] = tuple(levers)
@@ -271,6 +292,13 @@ class GovernanceEngine:
             if effect.lever_name:  # Non-empty effect
                 effects.append(effect)
         return GovernanceEffect.from_lever_effects(effects)
+
+    def screen_artifact_presentation(
+        self, metadata: Dict[str, Any], initiator_id: str, state: EnvState
+    ) -> None:
+        """Apply context binding to a proposal's metadata before acceptance."""
+        if self._artifact_binding is not None:
+            self._artifact_binding.screen_presentation(metadata, initiator_id, state)
 
     def apply_interaction(
         self,
@@ -470,15 +498,9 @@ class GovernanceEngine:
         if self._incoherence_forecaster is None:
             return list(self._levers)
 
-        variance_names = {
-            "self_ensemble",
-            "incoherence_breaker",
-            "decomposition",
-            "incoherence_friction",
-        }
         active: List[GovernanceLever] = []
         for lever in self._levers:
-            if lever.name in variance_names and not self._adaptive_variance_active:
+            if lever.reduces_variance and not self._adaptive_variance_active:
                 continue
             active.append(lever)
         return active

@@ -6,7 +6,11 @@ VENV=.venv-build
 
 uv python install "$PY"
 uv venv --python "$PY" "$VENV"
+# mkdocs pinned below 2.0: the Material team's advisory (printed in every
+# build) says MkDocs 2.0 removes the plugin system and theming our site
+# depends on, with no migration path. Keep 1.x until the ecosystem settles.
 uv pip install --python "$VENV/bin/python" \
+  'mkdocs>=1.6,<2' \
   mkdocs-material \
   'mkdocstrings[python]' \
   pymdown-extensions \
@@ -15,6 +19,10 @@ uv pip install --python "$VENV/bin/python" \
 
 (cd viz && npm install && npm run build:deploy)
 
+# Intentionally NOT --strict here: link/nav integrity is gated by CI
+# (.github/workflows/ci.yml, `mkdocs build --strict`) before code reaches main,
+# so production deploys stay resilient and aren't blocked by a late non-fatal
+# warning. Keep the gate in CI, keep deploys lenient.
 "$VENV/bin/mkdocs" build
 
 # gitlawb dashboard backfill snapshot.

@@ -82,6 +82,13 @@ class InteractionFinalizer:
 
         v_hat, p = self._proxy_computer.compute_labels(observables)
 
+        # Calibration scenarios: generators may expose a latent ground-truth
+        # draw (duck-typed, like the obfuscation offsets protocol). Drawn
+        # from the generator's *intended* latent probability — not the
+        # computed p — so injection drift shows up as calibration error.
+        draw = getattr(self._observable_generator, "draw_ground_truth", None)
+        ground_truth = draw(proposal.initiator_id) if callable(draw) else None
+
         interaction = SoftInteraction(
             interaction_id=proposal.proposal_id,
             initiator=proposal.initiator_id,
@@ -96,6 +103,7 @@ class InteractionFinalizer:
             v_hat=v_hat,
             p=p,
             tau=proposal.metadata.get("offered_transfer", 0),
+            ground_truth=ground_truth,
             metadata=proposal.metadata,
         )
 
@@ -139,9 +147,7 @@ class InteractionFinalizer:
                         payload={
                             "cost_a": gov_effect.cost_a,
                             "cost_b": gov_effect.cost_b,
-                            "levers": [
-                                e.lever_name for e in gov_effect.lever_effects
-                            ],
+                            "levers": [e.lever_name for e in gov_effect.lever_effects],
                         },
                         epoch=self._state.current_epoch,
                         step=self._state.current_step,
@@ -155,9 +161,16 @@ class InteractionFinalizer:
             initiator_state = self._state.get_agent(interaction.initiator)
             counterparty_state = self._state.get_agent(interaction.counterparty)
 
+            credit_resources = bool(
+                self._governance_engine
+                and self._governance_engine.config.payoff_flows_to_resources
+            )
+
             if initiator_state:
                 initiator_state.record_initiated(accepted=True, p=interaction.p)
                 initiator_state.total_payoff += payoff_init
+                if credit_resources:
+                    initiator_state.update_resources(payoff_init)
 
                 # Reputation delta formula:
                 #   rep_delta = (p - 0.5) - c_a
@@ -186,6 +199,8 @@ class InteractionFinalizer:
             if counterparty_state:
                 counterparty_state.record_received(accepted=True, p=interaction.p)
                 counterparty_state.total_payoff += payoff_counter
+                if credit_resources:
+                    counterparty_state.update_resources(payoff_counter)
 
         if interaction.initiator in self._agents:
             self._agents[interaction.initiator].update_from_outcome(
@@ -267,6 +282,29 @@ class InteractionFinalizer:
             if agent_state:
                 agent_state.update_resources(delta)
 
+        self._notify_governance_targets(effect)
+
+    def _notify_governance_targets(self, effect: GovernanceEffect) -> None:
+        """Tell agents that learn from governance when they were acted on.
+
+        Every interaction, step and epoch effect passes through
+        ``apply_governance_effect``, so this is the one place a freeze or a
+        penalty is known for certain. Penalty is the size of the negative
+        reputation and resource deltas; interaction costs (taxes, fees) are
+        left out because they are charged whether or not anything was caught.
+        """
+        penalties: Dict[str, float] = {}
+        for deltas in (effect.reputation_deltas, effect.resource_deltas):
+            for agent_id, delta in deltas.items():
+                if delta < 0:
+                    penalties[agent_id] = penalties.get(agent_id, 0.0) - delta
+        for agent_id in effect.agents_to_freeze | penalties.keys():
+            agent = self._agents.get(agent_id)
+            if agent is not None and hasattr(agent, "observe_governance"):
+                agent.observe_governance(
+                    penalty=penalties.get(agent_id, 0.0), detected=True
+                )
+
     # ------------------------------------------------------------------
     # Artifact layer
     # ------------------------------------------------------------------
@@ -294,7 +332,10 @@ class InteractionFinalizer:
             parent_interaction_id = registry.consume(
                 consumed_id, interaction.interaction_id
             )
-            if parent_interaction_id and parent_interaction_id not in interaction.causal_parents:
+            if (
+                parent_interaction_id
+                and parent_interaction_id not in interaction.causal_parents
+            ):
                 interaction.causal_parents.append(parent_interaction_id)
 
     # ------------------------------------------------------------------

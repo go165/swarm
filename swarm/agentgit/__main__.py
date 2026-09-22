@@ -4,17 +4,74 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from swarm.agentgit.bundle import build_bundle, load_bundle, verify_bundle, write_bundle
+from swarm.agentgit.bundle import (
+    DEFAULT_DEV_SIGNING_KEY,
+    build_bundle,
+    load_bundle,
+    verify_bundle,
+    write_bundle,
+)
+from swarm.agentgit.coordination import (
+    DEFAULT_DB_PATH,
+    CoordinationBoard,
+    clear_claim_marker,
+    read_claim_marker,
+    resolve_agent_id,
+    resolve_shared_db_path,
+    write_claim_marker,
+)
+from swarm.agentgit.memory import KINDS, SCOPES, MemoryEntry, MemoryStore
 from swarm.agentgit.policy import AgentGitPolicy, gate_bundle
+from swarm.agentgit.push_tokens import (
+    DEFAULT_PROTECTED_PATTERNS,
+    PushGrant,
+    check_push,
+    mint_push_grant,
+    parse_prepush_stdin,
+    verify_grant,
+)
+from swarm.agentgit.reputation import (
+    EVENT_MERGED,
+    EVENT_ROLLED_BACK,
+    EVENT_SECURITY_INCIDENT,
+    EVENT_TESTS_BROKEN,
+    ReputationLedger,
+)
+from swarm.agentgit.review import VERDICT_BLOCK, run_review_panel
+from swarm.agentgit.store import (
+    DEFAULT_LOG_PATH,
+    DEFAULT_NOTES_REF,
+    list_noted_commits,
+    read_log,
+    read_notes,
+    store_bundle,
+    verify_log,
+)
+from swarm.agentgit.wards import (
+    GATE_CLASS_DEFAULTS,
+    claim_gate,
+    for_gate_class,
+    format_stamp,
+    load_bead_wards,
+    load_declared_wards,
+)
 
 
 def cmd_attest(args: argparse.Namespace) -> int:
     policy = AgentGitPolicy.from_yaml(Path(args.policy))
     checks = _parse_checks(args.check)
+
+    reviews = None
+    if args.review:
+        synthesis = run_review_panel(Path(args.repo), base_ref=args.base)
+        reviews = synthesis.to_review_dicts()
+        print(synthesis.format_text())
+
     bundle = build_bundle(
         repo=Path(args.repo),
         task_id=args.task,
@@ -24,8 +81,23 @@ def cmd_attest(args: argparse.Namespace) -> int:
         check_results=checks,
         signing_key=args.signing_key or os.environ.get("AGENTGIT_SIGNING_KEY"),
         signer_id=args.signer_id,
+        reviews=reviews,
     )
     write_bundle(bundle, Path(args.output))
+
+    # Durable stores record failing attestations too: a policy failure is
+    # itself provenance worth keeping tamper-evident.
+    if args.store:
+        summary = store_bundle(
+            bundle,
+            repo=Path(args.repo),
+            backends=list(dict.fromkeys(args.store)),
+            log_path=Path(args.log_path) if args.log_path else None,
+            notes_ref=args.notes_ref,
+            commit=args.store_commit,
+        )
+        for backend, info in summary.items():
+            print(f"stored [{backend}] {info}")
 
     passed = bundle["policy"]["passed"]
     status = "PASS" if passed else "FAIL"
@@ -34,6 +106,59 @@ def cmd_attest(args: argparse.Namespace) -> int:
         f"({bundle['git']['totals']['changed_files']} changed files)"
     )
     return 0 if passed or args.warn_only else 1
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    """Inspect and verify durably stored provenance (event log + git notes)."""
+
+    repo = Path(args.repo)
+    signing_key = args.signing_key or os.environ.get("AGENTGIT_SIGNING_KEY")
+    exit_code = 0
+
+    log_path = Path(args.log_path) if args.log_path else repo / DEFAULT_LOG_PATH
+    entries = read_log(log_path)
+    print(f"log: {log_path} ({len(entries)} entries)")
+    for entry in entries:
+        bundle = entry.get("bundle", {})
+        print(
+            f"- seq={entry.get('seq')} task={bundle.get('task', {}).get('task_id')} "
+            f"agent={bundle.get('agent', {}).get('agent_id')} "
+            f"policy_passed={bundle.get('policy', {}).get('passed')}"
+        )
+    if args.verify:
+        # Match cmd_verify's key handling: fall back to the dev key so bundle
+        # signatures inside the log are always checked under --verify.
+        ok, errors = verify_log(
+            log_path, signing_key=signing_key or DEFAULT_DEV_SIGNING_KEY
+        )
+        print(f"{'PASS' if ok else 'FAIL'} log chain verify: {log_path}")
+        for error in errors:
+            print(f"- {error}")
+        if not ok:
+            exit_code = 1
+
+    commits = [args.commit] if args.commit else list_noted_commits(repo, notes_ref=args.notes_ref)
+    for commit in commits:
+        bundles = read_notes(repo, commit, notes_ref=args.notes_ref)
+        print(f"notes[{args.notes_ref}] {commit}: {len(bundles)} bundle(s)")
+        for bundle in bundles:
+            note_ok = True
+            note_errors: list[str] = []
+            if args.verify:
+                note_ok, note_errors = verify_bundle(
+                    bundle, signing_key=signing_key, require_policy_pass=False
+                )
+            state = "" if not args.verify else (" [verified]" if note_ok else " [INVALID]")
+            print(
+                f"- task={bundle.get('task', {}).get('task_id')} "
+                f"agent={bundle.get('agent', {}).get('agent_id')} "
+                f"policy_passed={bundle.get('policy', {}).get('passed')}{state}"
+            )
+            for error in note_errors:
+                print(f"  - {error}")
+            if args.verify and not note_ok:
+                exit_code = 1
+    return exit_code
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
@@ -89,11 +214,17 @@ def cmd_gate(args: argparse.Namespace) -> int:
     # agent-supplied and ignored, so a check-based rule can't be defeated by an
     # agent self-attesting a passing result. Unsupplied checks fail closed.
     trusted_checks = _parse_checks(args.check)
+    # Trust likewise comes from the CI-side ledger, never the bundle. With no
+    # ledger (or no history) it stays None and trust_below rules fail closed.
+    agent_trust = None
+    if args.reputation_ledger:
+        agent_trust = ReputationLedger(Path(args.reputation_ledger)).trust_for_bundle(bundle)
     ok, decisions = gate_bundle(
         bundle,
         policy,
         trusted_overrides=args.override,
         trusted_checks=trusted_checks,
+        agent_trust=agent_trust,
     )
     status = "PASS" if ok else "FAIL"
     print(f"{status} agentgit gate: {args.bundle} (policy {args.policy})")
@@ -102,6 +233,440 @@ def cmd_gate(args: argparse.Namespace) -> int:
             label = "WARN" if decision.severity == "warning" else "FAIL"
             print(f"- [{label}] [{decision.policy_id}] {decision.reason}")
     return 0 if ok else 1
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """Run the reviewer panel and print the synthesized outcome."""
+
+    import json
+
+    synthesis = run_review_panel(Path(args.repo), base_ref=args.base)
+    if args.json:
+        print(json.dumps(synthesis.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(synthesis.format_text())
+    blocked = synthesis.verdict == VERDICT_BLOCK
+    return 0 if not blocked or args.warn_only else 1
+
+
+def _repo_root() -> Path:
+    return Path(os.environ.get("MAIN_REPO_ROOT") or ".")
+
+
+def cmd_claim(args: argparse.Namespace) -> int:
+    """Atomic work-start: claim a task, refusing if another session holds it.
+
+    This is the duplication gate. Route ALL work-start through it: two
+    sessions cannot both claim the same task, so they cannot both build the
+    same thing (the 2026-07-22 failure). Uses the shared cross-worktree DB.
+    """
+
+    db = Path(args.db) if args.db else resolve_shared_db_path()
+    agent = args.agent or resolve_agent_id()
+    root = _repo_root()
+
+    with CoordinationBoard(db) as board:
+        if args.action == "status":
+            mine = [c for c in board.active_claims() if c["agent"] == agent]
+            others = [c for c in board.active_claims() if c["agent"] != agent]
+            print(f"agent: {agent}   db: {db}")
+            print(f"held by you ({len(mine)}): " +
+                  (", ".join(c["task_id"] for c in mine) or "-"))
+            for c in others:
+                print(f"held by {c['agent']}: {c['task_id']}")
+            return 0
+
+        if not args.task:
+            print("claim: a task id is required")
+            return 1
+
+        if args.action == "release":
+            ok = board.complete(agent, args.task)
+            marker = read_claim_marker(root)
+            if marker and marker["task_id"] == args.task:
+                clear_claim_marker(root)
+            print(f"{'RELEASED' if ok else 'NOT-HELD'} {args.task}")
+            return 0 if ok else 1
+
+        if args.action == "check":
+            # Hook gate: is the task being committed held by ANOTHER session?
+            holder = board.claim_holder(args.task)
+            if holder is not None and holder != agent:
+                print(f"COLLISION: {args.task} is claimed by {holder}, not you ({agent})")
+                return 1
+            return 0
+
+        # Ward gate (illq.2): the track's stamped bounds vs what this session
+        # declares. Checked BEFORE the claim is taken so a refused claimant
+        # never holds the task. Unstamped beads pass through unchanged.
+        track = None if args.no_wards else load_bead_wards(args.task)
+        try:
+            declared = load_declared_wards(root, args.wards)
+        except (OSError, ValueError) as exc:
+            print(f"REFUSED: declared wards unreadable: {exc}")
+            return 3
+        gate = claim_gate(track, declared)
+        if gate.errors:
+            print(f"REFUSED: {args.task} — declared wards exceed the track's stamped bounds:")
+            for err in gate.errors:
+                print(f"  - {err}")
+            print("  Narrow your declaration (.agentgit/wards.json or --wards) or take")
+            print("  another bead. A child may only narrow (INV-6).")
+            return 3
+
+        # claim (default): atomic, refuse-on-conflict — the prevention.
+        result = board.claim(agent, args.task)
+        if not result.ok:
+            print(f"REFUSED: {args.task} is already claimed by {result.holder}.")
+            print("  Another session is doing this work. Pick different work, or")
+            print("  coordinate: python -m swarm.agentgit claim status")
+            return 2
+        effective = gate.wards.to_dict() if gate.wards is not None else None
+        write_claim_marker(root, args.task, agent, wards=effective)
+        # Best-effort: mark the bead in_progress so bd ready reflects the claim.
+        try:
+            subprocess.run(
+                ["bd", "update", args.task, "--status=in_progress"],
+                check=False, capture_output=True, timeout=15,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            pass
+        print(f"CLAIMED {args.task} by {agent} (marker written; bead → in_progress)")
+        if gate.wards is not None:
+            w = gate.wards
+            print(
+                f"  wards: max_turns={w.max_turns} max_depth={w.max_depth} "
+                f"max_children={w.max_children} done_gate={w.done_gate} "
+                f"negative_spec={len(w.negative_spec)}"
+            )
+        return 0
+
+
+def cmd_wards(args: argparse.Namespace) -> int:
+    """Build, show, or dry-run-check the WARDS stamp on a bead (illq.2)."""
+
+    root = _repo_root()
+    if args.action == "stamp":
+        try:
+            wards = for_gate_class(
+                args.gate_class,
+                negative_spec=args.negative or (),
+                permissions=args.permission or (),
+                **{k: v for k, v in {
+                    "max_turns": args.max_turns,
+                    "max_depth": args.max_depth,
+                    "max_children": args.max_children,
+                    "timeout_s": args.timeout_s,
+                }.items() if v is not None},
+            )
+        except ValueError as exc:
+            print(f"wards: {exc}")
+            return 1
+        errors = wards.errors()
+        if errors:
+            print("wards: stamp would be unbounded:")
+            for err in errors:
+                print(f"  - {err}")
+            return 1
+        line = format_stamp(wards)
+        if args.bead:
+            try:
+                proc = subprocess.run(
+                    ["bd", "comments", "add", args.bead, line],
+                    check=False, capture_output=True, text=True, timeout=15,
+                )
+            except (FileNotFoundError, subprocess.SubprocessError) as exc:
+                print(f"wards: could not post stamp via bd: {exc}")
+                print(line)
+                return 1
+            if proc.returncode != 0:
+                print(f"wards: bd refused the comment: {proc.stderr.strip()}")
+                print(line)
+                return 1
+            print(f"STAMPED {args.bead}")
+        print(line)
+        return 0
+
+    if not args.bead:
+        print("wards: a bead id is required")
+        return 1
+    track = load_bead_wards(args.bead)
+    if args.action == "show":
+        if track is None:
+            print(f"{args.bead}: no WARDS stamp (bd unavailable, or bead never stamped)")
+            return 1
+        import json as _json
+        print(_json.dumps(track.to_dict(), indent=2, sort_keys=True))
+        for err in track.errors():
+            print(f"  ! {err}")
+        return 0
+
+    # check: dry-run the claim gate without taking the claim.
+    try:
+        declared = load_declared_wards(root, args.wards)
+    except (OSError, ValueError) as exc:
+        print(f"REFUSED: declared wards unreadable: {exc}")
+        return 3
+    gate = claim_gate(track, declared)
+    if gate.errors:
+        print(f"WOULD-REFUSE {args.bead}:")
+        for err in gate.errors:
+            print(f"  - {err}")
+        return 3
+    if gate.wards is None:
+        print(f"WOULD-CLAIM {args.bead}: no track stamp and no declaration (unbounded — pre-illq.2 behaviour)")
+    else:
+        print(f"WOULD-CLAIM {args.bead} under {format_stamp(gate.wards)}")
+    return 0
+
+
+def cmd_coord(args: argparse.Namespace) -> int:
+    """Machine-speed coordination: claim/lock/propose/respond/conflicts."""
+
+    agent = args.agent or os.environ.get("SESSION_ID")
+    if not agent:
+        print("coord: no agent identity; pass --agent or set SESSION_ID")
+        return 1
+
+    with CoordinationBoard(args.db) as board:
+        if args.action == "claim":
+            result = board.claim(agent, args.target)
+            if result.ok:
+                print(f"CLAIMED {args.target} (claim {result.claim_id})")
+                return 0
+            print(f"HELD {args.target} by {result.holder}")
+            return 1
+        if args.action == "yield":
+            ok = board.yield_claim(agent, args.target)
+            print(f"{'YIELDED' if ok else 'NOT-HELD'} {args.target}")
+            return 0 if ok else 1
+        if args.action == "done":
+            ok = board.complete(agent, args.target)
+            print(f"{'DONE' if ok else 'NOT-HELD'} {args.target}")
+            return 0 if ok else 1
+        if args.action == "lock":
+            lock_result = board.lock(agent, args.target, reason=args.reason)
+            if lock_result.ok:
+                print(f"LOCKED {lock_result.resource} (lock {lock_result.lock_id})")
+                return 0
+            for c in lock_result.conflicts:
+                print(f"CONFLICT {c['resource']} held by {c['agent']}: {c['reason']}")
+            return 1
+        if args.action == "release":
+            ok = board.release(agent, args.target)
+            print(f"{'RELEASED' if ok else 'NOT-HELD'} {args.target}")
+            return 0 if ok else 1
+        if args.action == "propose":
+            proposal_id = board.propose(
+                agent, args.kind, args.target, task_id=args.task, to_agent=args.to
+            )
+            print(f"PROPOSED {args.kind} #{proposal_id} -> {args.to}")
+            return 0
+        if args.action == "respond":
+            ok = board.respond(
+                agent, int(args.target), accept=args.accept, response=args.reason
+            )
+            print(f"{'RESPONDED' if ok else 'NOT-OPEN'} #{args.target}")
+            return 0 if ok else 1
+        if args.action == "conflicts":
+            conflicts = board.detect_conflicts(agent, args.paths or [args.target])
+            for c in conflicts:
+                print(
+                    f"CONFLICT {c['resource']} held by {c['agent']} "
+                    f"(overlaps: {', '.join(c['paths'])})"
+                )
+            if not conflicts:
+                print("no conflicting work detected")
+            return 1 if conflicts else 0
+        # status
+        for claim in board.active_claims():
+            print(f"claim: {claim['task_id']} by {claim['agent']} since {claim['ts']}")
+        for lock in board.active_locks():
+            print(f"lock: {lock['resource']} by {lock['agent']}: {lock['reason']}")
+        for prop in board.open_proposals(agent):
+            print(
+                f"proposal #{prop['id']} [{prop['kind']}] from {prop['agent']} "
+                f"to {prop['to_agent']}: {prop['body'][:80]}"
+            )
+        return 0
+
+
+def _format_memory(entry: MemoryEntry) -> str:
+    flag = " [RETIRED]" if entry.retired else ""
+    return (
+        f"[{entry.scope}/{entry.kind}] {entry.subject}: {entry.body} "
+        f"(id={entry.id} v{entry.version} by {entry.author}){flag}"
+    )
+
+
+def _push_authority_key(args: argparse.Namespace) -> Optional[str]:
+    return args.authority_key or os.environ.get("AGENTGIT_PUSH_AUTHORITY_KEY")
+
+
+def cmd_push_token(args: argparse.Namespace) -> int:
+    """Mint / verify short-lived, ref-scoped git push grants."""
+
+    key = _push_authority_key(args)
+    if not key:
+        print("push-token: no authority key (set --authority-key or "
+              "AGENTGIT_PUSH_AUTHORITY_KEY)")
+        return 1
+
+    if args.action == "mint":
+        if not args.ref_pattern:
+            print("push-token mint: at least one --ref-pattern is required")
+            return 1
+        grant = mint_push_grant(
+            task_id=args.task,
+            agent_id=args.agent,
+            allowed_ref_patterns=args.ref_pattern,
+            authority_key=key,
+            ttl_seconds=args.ttl,
+        )
+        print(grant.to_token())
+        return 0
+
+    if args.action == "verify":
+        token = args.token or (sys.stdin.read().strip() if not sys.stdin.isatty() else "")
+        if not token:
+            print("push-token verify: pass --token or pipe a token on stdin")
+            return 1
+        try:
+            parsed = PushGrant.from_token(token)
+        except (ValueError, TypeError):
+            print("INVALID")
+            print("- token is not valid JSON for a push grant")
+            return 1
+        ok, errors = verify_grant(parsed, authority_key=key)
+        print("VALID" if ok else "INVALID")
+        for e in errors:
+            print(f"- {e}")
+        return 0 if ok else 1
+
+    # prepush: consume git pre-push stdin, gate against the grant
+    token = args.token or os.environ.get("AGENTGIT_PUSH_TOKEN", "")
+    prepush_grant: Optional[PushGrant] = None
+    if token:
+        try:
+            prepush_grant = PushGrant.from_token(token)
+        except (ValueError, TypeError):
+            print("agentgit push-token: malformed token — failing closed", file=sys.stderr)
+            return 1
+    refs = parse_prepush_stdin(sys.stdin.read())
+    protected = args.protected or list(DEFAULT_PROTECTED_PATTERNS)
+    ok, reasons = check_push(
+        refs, grant=prepush_grant, authority_key=key, protected_patterns=protected
+    )
+    if ok:
+        return 0
+    print("agentgit push-token: push denied", file=sys.stderr)
+    for r in reasons:
+        print(f"- {r}", file=sys.stderr)
+    return 1
+
+
+def cmd_reputation(args: argparse.Namespace) -> int:
+    """Track-record reputation: record attestations/outcomes, show records."""
+
+    ledger = ReputationLedger(Path(args.ledger))
+    if args.action == "record":
+        if not args.bundle:
+            print("reputation record: --bundle is required")
+            return 1
+        key = ledger.record_attestation(load_bundle(Path(args.bundle)))
+        print(f"RECORDED attestation for {key.key_id}")
+        return 0
+    if args.action == "outcome":
+        if not args.target:
+            print("reputation outcome: a key_id argument is required")
+            return 1
+        outcome_flags = {
+            EVENT_MERGED: args.merged,
+            EVENT_ROLLED_BACK: args.rolled_back,
+            EVENT_TESTS_BROKEN: args.tests_broken,
+            EVENT_SECURITY_INCIDENT: args.security_incident,
+        }
+        chosen = [name for name, on in outcome_flags.items() if on]
+        if len(chosen) != 1:
+            print(
+                "reputation outcome: pass exactly one of --merged, "
+                "--rolled-back, --tests-broken, --security-incident"
+            )
+            return 1
+        ledger.record_outcome(args.target, chosen[0], task_id=args.task)
+        print(f"RECORDED {chosen[0]} for {args.target}")
+        return 0
+    # show
+    key_ids = [args.target] if args.target else ledger.key_ids()
+    if not key_ids:
+        print("no reputation records")
+        return 0
+    for key_id in key_ids:
+        record = ledger.track_record(key_id)
+        domains = ", ".join(f"{d}×{n}" for d, n in sorted(record.domains.items())) or "-"
+        print(
+            f"{key_id}: trust={record.trust:.3f} "
+            f"attestations={record.attestations} "
+            f"(policy pass {record.policy_pass_rate:.0%}) "
+            f"merges={record.merges} rollbacks={record.rollbacks} "
+            f"tests_broken={record.test_breakages} "
+            f"security_incidents={record.security_incidents} "
+            f"review_burden={record.review_burden:.1f} "
+            f"domains: {domains}"
+        )
+    return 0
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Structured, versioned, scoped operational memory."""
+
+    agent = args.agent or os.environ.get("SESSION_ID") or "local"
+    store = MemoryStore(
+        Path(args.repo),
+        agent=agent,
+        home=Path(args.home) if args.home else None,
+    )
+    if args.action == "remember":
+        if not args.subject or not args.body:
+            print("memory remember: a subject argument and --body are required")
+            return 1
+        entry = store.remember(
+            scope=args.scope,
+            kind=args.kind,
+            subject=args.subject,
+            body=args.body,
+            author=agent,
+            entry_id=args.id,
+        )
+        print(f"REMEMBERED {_format_memory(entry)}")
+        return 0
+    if args.action == "recall":
+        entries = store.recall(args.subject or None, kind=args.kind_filter)
+        for entry in entries:
+            print(_format_memory(entry))
+        if not entries:
+            print("no memories found")
+        return 0
+    if args.action == "retire":
+        if not args.id:
+            print("memory retire: --id is required")
+            return 1
+        ok = store.retire(
+            scope=args.scope, entry_id=args.id, author=agent, reason=args.reason
+        )
+        print(f"{'RETIRED' if ok else 'NOT-FOUND'} {args.id}")
+        return 0 if ok else 1
+    # history
+    if not args.id:
+        print("memory history: --id is required")
+        return 1
+    versions = store.history(args.id, scope=args.scope)
+    for entry in versions:
+        print(f"v{entry.version} @ {entry.updated_at}: {_format_memory(entry)}")
+    if not versions:
+        print("no memories found")
+        return 1
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,13 +697,54 @@ def build_parser() -> argparse.ArgumentParser:
     attest.add_argument(
         "--signing-key",
         default=None,
-        help="Hex HMAC key. Defaults to AGENTGIT_SIGNING_KEY or a dev key.",
+        help="Hex Ed25519 seed (64 hex chars). Defaults to AGENTGIT_SIGNING_KEY or a dev key.",
     )
-    attest.add_argument("--signer-id", default="agentgit-local")
+    attest.add_argument(
+        "--signer-id",
+        default=None,
+        help="Deprecated and ignored: signer_id is the signing key's DID (bead jxyi).",
+    )
     attest.add_argument(
         "--warn-only",
         action="store_true",
         help="Write bundle but return success even when policy fails",
+    )
+    attest.add_argument(
+        "--store",
+        action="append",
+        default=[],
+        choices=["log", "git-notes"],
+        help=(
+            "Also store the bundle durably: 'log' appends to the hash-chained "
+            "event log; 'git-notes' attaches it to the attested commit. May be "
+            "repeated."
+        ),
+    )
+    attest.add_argument(
+        "--log-path",
+        default=None,
+        help=f"Event log path (default: <repo>/{DEFAULT_LOG_PATH})",
+    )
+    attest.add_argument(
+        "--notes-ref",
+        default=DEFAULT_NOTES_REF,
+        help=f"Git notes ref for provenance (default: {DEFAULT_NOTES_REF})",
+    )
+    attest.add_argument(
+        "--store-commit",
+        default=None,
+        help=(
+            "Commit to attach the git note to (default: the bundle's recorded "
+            "head commit)"
+        ),
+    )
+    attest.add_argument(
+        "--review",
+        action="store_true",
+        help=(
+            "Run the multi-reviewer panel over the diff and record its "
+            "synthesized outcome in the bundle's provenance reviews"
+        ),
     )
     attest.set_defaults(func=cmd_attest)
 
@@ -147,7 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument(
         "--signing-key",
         default=None,
-        help="Hex HMAC key. Defaults to AGENTGIT_SIGNING_KEY or a dev key.",
+        help="Hex Ed25519 seed (64 hex chars). Defaults to AGENTGIT_SIGNING_KEY or a dev key.",
     )
     verify.add_argument(
         "--allow-policy-fail",
@@ -166,7 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--signing-key",
         default=None,
         help=(
-            "Hex HMAC key for bundle verification (required; falls back to "
+            "Hex Ed25519 seed for bundle verification (required; falls back to "
             "AGENTGIT_SIGNING_KEY). The gate fails closed if neither is set so it "
             "never accepts a dev-key-signed bundle as authentic."
         ),
@@ -189,7 +795,267 @@ def build_parser() -> argparse.ArgumentParser:
             "May be repeated."
         ),
     )
+    gate.add_argument(
+        "--reputation-ledger",
+        default=None,
+        help=(
+            "CI-side reputation ledger (JSONL). Supplies the acting key's "
+            "trust score to trust_below rules; without it (or without any "
+            "history) trust is unknown and those rules fail closed."
+        ),
+    )
     gate.set_defaults(func=cmd_gate)
+
+    history = subparsers.add_parser(
+        "history",
+        help="Inspect/verify durably stored provenance (event log + git notes)",
+    )
+    history.add_argument("--repo", default=".", help="Git repository path")
+    history.add_argument(
+        "--log-path",
+        default=None,
+        help=f"Event log path (default: <repo>/{DEFAULT_LOG_PATH})",
+    )
+    history.add_argument(
+        "--notes-ref",
+        default=DEFAULT_NOTES_REF,
+        help=f"Git notes ref for provenance (default: {DEFAULT_NOTES_REF})",
+    )
+    history.add_argument(
+        "--commit",
+        default=None,
+        help="Show only notes attached to this commit (default: all noted commits)",
+    )
+    history.add_argument(
+        "--verify",
+        action="store_true",
+        help="Verify the log hash chain and every stored bundle's signature",
+    )
+    history.add_argument(
+        "--signing-key",
+        default=None,
+        help="Hex Ed25519 seed (64 hex chars). Defaults to AGENTGIT_SIGNING_KEY or a dev key.",
+    )
+    history.set_defaults(func=cmd_history)
+
+    review = subparsers.add_parser(
+        "review",
+        help="Run the multi-reviewer panel over the current diff",
+    )
+    review.add_argument("--repo", default=".", help="Git repository path")
+    review.add_argument("--base", default="HEAD", help="Base ref to diff against")
+    review.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the full synthesis as JSON instead of the text summary",
+    )
+    review.add_argument(
+        "--warn-only",
+        action="store_true",
+        help="Print the synthesis but return success even on a block verdict",
+    )
+    review.set_defaults(func=cmd_review)
+
+    claim = subparsers.add_parser(
+        "claim",
+        help="Atomic work-start: claim a task (refuses if another session holds it)",
+    )
+    claim.add_argument("action", choices=["claim", "release", "check", "status"],
+                       nargs="?", default="claim")
+    claim.add_argument("task", nargs="?", default="", help="Task / bead id")
+    claim.add_argument("--agent", default=None,
+                       help="Agent identity (default: $SESSION_ID or main-checkout@host)")
+    claim.add_argument("--db", default=None,
+                       help="Coordination DB (default: shared $MAIN_REPO_ROOT/runs/runs.db)")
+    claim.add_argument("--wards", default=None,
+                       help="Declared wards: JSON or path (default: $AGENT_WARDS, then .agentgit/wards.json)")
+    claim.add_argument("--no-wards", action="store_true",
+                       help="Skip the ward gate (do not read the bead's WARDS stamp)")
+    claim.set_defaults(func=cmd_claim)
+
+    wards = subparsers.add_parser(
+        "wards",
+        help="Build/show/check the WARDS stamp a dispatch round puts on a bead",
+    )
+    wards.add_argument("action", choices=["stamp", "show", "check"])
+    wards.add_argument("bead", nargs="?", default="", help="Bead id (stamp: post to it; show/check: read it)")
+    wards.add_argument("--gate-class", default="G1", choices=sorted(GATE_CLASS_DEFAULTS),
+                       help="bv-dispatch gate class; sets default turn/depth/children bounds")
+    wards.add_argument("--negative", action="append", default=None, metavar="TEXT",
+                       help="One insufficient outcome (repeatable) — the NEGATIVE SPEC")
+    wards.add_argument("--permission", action="append", default=None, metavar="TOKEN",
+                       help="Permission token the track grants (repeatable)")
+    wards.add_argument("--max-turns", type=int, default=None)
+    wards.add_argument("--max-depth", type=int, default=None)
+    wards.add_argument("--max-children", type=int, default=None)
+    wards.add_argument("--timeout-s", type=float, default=None)
+    wards.add_argument("--wards", default=None,
+                       help="check: declared wards JSON or path (default: $AGENT_WARDS, .agentgit/wards.json)")
+    wards.set_defaults(func=cmd_wards)
+
+    coord = subparsers.add_parser(
+        "coord",
+        help="Machine-speed coordination: claim/lock/propose/respond/conflicts",
+    )
+    coord.add_argument(
+        "action",
+        choices=[
+            "claim", "yield", "done", "lock", "release",
+            "propose", "respond", "conflicts", "status",
+        ],
+    )
+    coord.add_argument(
+        "target",
+        nargs="?",
+        default="",
+        help=(
+            "Task id (claim/yield/done), resource (lock/release/conflicts), "
+            "proposal body (propose), or proposal id (respond)"
+        ),
+    )
+    coord.add_argument(
+        "paths",
+        nargs="*",
+        help="Additional paths to check (conflicts action)",
+    )
+    coord.add_argument(
+        "--agent",
+        default=None,
+        help="Agent identity (default: $SESSION_ID)",
+    )
+    coord.add_argument(
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help=f"Coordination database path (default: {DEFAULT_DB_PATH})",
+    )
+    coord.add_argument(
+        "--kind",
+        default="plan",
+        choices=["plan", "review", "delegate"],
+        help="Proposal kind (propose action)",
+    )
+    coord.add_argument("--task", default="", help="Related task id (propose action)")
+    coord.add_argument(
+        "--to", default="#swarm", help="Addressee agent (propose action)"
+    )
+    coord.add_argument(
+        "--reason", default="", help="Lock reason / response text"
+    )
+    coord.add_argument(
+        "--accept",
+        action="store_true",
+        help="Accept the proposal (respond action; omit to reject)",
+    )
+    coord.set_defaults(func=cmd_coord)
+
+    memory = subparsers.add_parser(
+        "memory",
+        help="Structured, versioned, repo/org/agent-scoped operational memory",
+    )
+    memory.add_argument("action", choices=["remember", "recall", "retire", "history"])
+    memory.add_argument(
+        "subject",
+        nargs="?",
+        default="",
+        help="Path/module/topic the memory is about (required for remember; "
+        "optional recall filter)",
+    )
+    memory.add_argument("--repo", default=".", help="Git repository path")
+    memory.add_argument(
+        "--scope",
+        default="repo",
+        choices=list(SCOPES),
+        help="Memory scope (remember/retire/history; default: repo)",
+    )
+    memory.add_argument(
+        "--kind",
+        default="context",
+        choices=list(KINDS),
+        help="Memory kind (remember; default: context)",
+    )
+    memory.add_argument(
+        "--kind-filter",
+        default=None,
+        choices=list(KINDS),
+        help="Only recall memories of this kind",
+    )
+    memory.add_argument("--body", default="", help="Memory body text (remember)")
+    memory.add_argument("--id", default=None, help="Memory id (update/retire/history)")
+    memory.add_argument("--reason", default="", help="Retire reason")
+    memory.add_argument(
+        "--agent", default=None, help="Agent identity (default: $SESSION_ID or 'local')"
+    )
+    memory.add_argument(
+        "--home",
+        default=None,
+        help="Base dir for org/agent memory files (default: ~)",
+    )
+    memory.set_defaults(func=cmd_memory)
+
+    reputation = subparsers.add_parser(
+        "reputation",
+        help="Track-record reputation attached to identity+runtime+config",
+    )
+    reputation.add_argument("action", choices=["record", "outcome", "show"])
+    reputation.add_argument(
+        "target",
+        nargs="?",
+        default="",
+        help="Reputation key_id (outcome; optional filter for show)",
+    )
+    reputation.add_argument(
+        "--ledger",
+        default=".agentgit/reputation.jsonl",
+        help="Reputation ledger path (default: .agentgit/reputation.jsonl)",
+    )
+    reputation.add_argument(
+        "--bundle", default=None, help="Provenance bundle to record (record action)"
+    )
+    reputation.add_argument("--task", default="", help="Related task id (outcome)")
+    reputation.add_argument("--merged", action="store_true", help="Change merged cleanly")
+    reputation.add_argument("--rolled-back", action="store_true", help="Merge was rolled back")
+    reputation.add_argument("--tests-broken", action="store_true", help="Change broke tests post-merge")
+    reputation.add_argument(
+        "--security-incident", action="store_true", help="Change caused a security incident"
+    )
+    reputation.set_defaults(func=cmd_reputation)
+
+    push_token = subparsers.add_parser(
+        "push-token",
+        help="Mint/verify short-lived ref-scoped git push grants; gate a pre-push",
+    )
+    push_token.add_argument("action", choices=["mint", "verify", "prepush"])
+    push_token.add_argument(
+        "--authority-key",
+        default=None,
+        help="HMAC authority key (or AGENTGIT_PUSH_AUTHORITY_KEY). The agent "
+        "must NOT hold this — it is what makes a grant unforgeable.",
+    )
+    push_token.add_argument("--task", default="", help="Task id the grant is bound to")
+    push_token.add_argument("--agent", default="", help="Agent id the grant is for")
+    push_token.add_argument(
+        "--ref-pattern",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="fnmatch ref pattern the grant authorizes (repeatable), e.g. "
+        "'refs/heads/agent/*'",
+    )
+    push_token.add_argument(
+        "--ttl", type=int, default=900, help="Grant lifetime in seconds (mint; default 900)"
+    )
+    push_token.add_argument(
+        "--token", default=None, help="Token to verify / gate with (verify, prepush)"
+    )
+    push_token.add_argument(
+        "--protected",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Protected ref pattern for the prepush gate (repeatable; default: "
+        "main/master/tags)",
+    )
+    push_token.set_defaults(func=cmd_push_token)
     return parser
 
 

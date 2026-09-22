@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0,<83", "wheel"]
+requires = ["setuptools>=61.0,<85", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -26,9 +26,17 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "pydantic>=2.0",
-    "pandas>=2.0",
+    "pandas>=2.1",
     "pyyaml>=6.0",
     "pynacl>=1.5",
+    # swarm/detection/stats.py imports `from scipy import stats` at module level,
+    # so detection is unimportable without it. It was declared only in the
+    # `analysis` and `beta` extras until bead cqis; CI never caught that because
+    # it installs `analysis`. Audited 2026-09-17 with the extras blocked:
+    # swarm.detection.stats is the ONLY core module that fails that way —
+    # matplotlib, fastapi, web3, streamlit and the rest are genuinely optional
+    # subsystems and stay in extras. The `core-import` CI job pins this.
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
@@ -59,6 +67,20 @@ runtime = [
     # The worktree bridge CLI (swarm/bridges/worktree/__main__.py) imports rich
     # unconditionally and the agentgit attest loop drives it as a subprocess.
     "rich>=13.0",
+]
+# The distributional generalization lives in its own repo, vendored as the
+# `beta-swarm/` submodule (swarm-ai-research/beta-swarm). Install it editable
+# to make `import beta_swarm` resolve:
+#     git submodule update --init && python -m pip install -e beta-swarm/
+# This extra keeps a scipy floor for parity with that repo's own pin.
+# NOTE: the claim this comment used to make -- that core `swarm` does not
+# need scipy -- is false: swarm/detection/stats.py, swarm/analysis/*.py,
+# swarm/research/agents.py and swarm/scripts/analyze.py all import it. It is
+# declared only in the `analysis` and `beta` extras, so a bare
+# `pip install swarm-safety` cannot import swarm.detection.stats. CI passes
+# only because it installs `analysis`. Pre-existing; tracked separately.
+beta = [
+    "scipy>=1.10",
 ]
 llm = [
     "anthropic>=0.40.0",
@@ -118,9 +140,9 @@ gamescape = [
     "gamescape",
 ]
 langgraph = [
-    "langgraph==1.2.4",
-    "langchain-core==1.4.0",
-    "langchain-anthropic==1.4.4",
+    "langgraph==1.2.11",
+    "langchain-core==1.6.2",
+    "langchain-anthropic==1.7.1",
     "langchain-ollama>=0.3.0",
     "langchain-openai>=0.3.0",
 ]
@@ -130,6 +152,13 @@ langgraph = [
 #   pip install "swarm-safety[evolve]" \
 #     "darwinian-evolver @ git+https://github.com/imbue-ai/darwinian_evolver.git"
 evolve = []
+# NOTE: a-evolve is GitHub-only and ships no LICENSE file (README claims MIT)
+# as of the pinned SHA — do NOT vendor its code; install it side-by-side:
+#   pip install "swarm-safety[aevolve]" \
+#     "a-evolve @ git+https://github.com/A-EVO-Lab/a-evolve.git@c9d4789f2be499589d543aa08e74d05d10d93177"
+# The bridge (swarm/bridges/aevolve/) soft-imports agent_evolve and stays
+# fully functional/testable without it (structural stand-in types).
+aevolve = []
 gepa = [
     "gepa>=0.1.0",
 ]
@@ -196,10 +225,14 @@ markers = [
     "memory: mark test as memory-focused (runs with memory limits)",
     "memory_intensive: mark test as long-running memory test (>1000 epochs)",
     "perf: mark wall-clock performance budget test (run serially without coverage; tracer/xdist distort timing)",
+    "smoke: fast determinism smoke tests on the live calibration track (select with '-m smoke')",
 ]
 
 [tool.mypy]
-python_version = "3.10"
+# Must be >= 3.12: numpy's stubs use PEP 695 `type` statements, which mypy
+# rejects as syntax errors when emulating an older target version. CI runs on
+# 3.12, so check against it. Runtime support floor stays at 3.10 (requires-python).
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
@@ -224,6 +257,8 @@ select = [
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
+
+[tool.ruff.lint.per-file-ignores]
 
 [tool.coverage.run]
 source = ["swarm"]

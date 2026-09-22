@@ -154,3 +154,94 @@ explicitly in any downstream finding.
 
 Arm A is independent and can begin immediately. Arms B and C share the
 judge pipeline and are run in sequence.
+
+---
+
+## Post-registration addenda (append-only; not part of the registered design)
+
+- **2026-07-19 — Arm A findings & deviation analysis:**
+  [calibration-arm-a-deviation-analysis.md](calibration-arm-a-deviation-analysis.md).
+  Registered readout k\*=5.0, ECE 0.187, Brier 0.0906; outcome branch 2
+  ("report the gap honestly, re-tune k; adaptive study still unblocked")
+  applies. Includes a labeled exploratory k-extension and the
+  latent-p-unrecoverability root cause; the ECE<0.1 / Brier<0.05 numbers
+  circulating in the tracker are the c89o scenario spec, not registered
+  criteria of this document.
+
+- **2026-07-22 — c89o controlled-injection scenario: registered design and
+  criteria (written and committed BEFORE the confirmatory run):**
+  - **Design:** `scenarios/calibration_proxy_fidelity.yaml` — six 2-agent
+    clusters with `v_hat_target ∈ {−1, −0.6, −0.2, +0.2, +0.6, +1}`;
+    observables solved in closed form so `ProxyComputer.compute_v_hat`
+    lands on the target (max residual 2.2e-4, on the −1 penalty-floor
+    target only); latent ground truth drawn per interaction from
+    `p_latent = compute_p(target)` with the pipeline's default
+    `sigmoid_k = 2.0`; governance fully disabled; single confirmatory run
+    at seed 42, 10 epochs × 200 steps (measured throughput ≈1.6
+    interactions/step ⇒ expected ≥500 latent draws per cluster, matching
+    arm A's registered per-bin minimum; the architect sketch's 10×20 was
+    ~12× underpowered and is amended here, pre-run).
+  - **Criteria (confirmatory):**
+    1. **ECE < 0.1** (10 equal-width bins, as arm A).
+    2. **Excess Brier < 0.02**, where excess = Brier − Σ_c (n_c/N)·p_c(1−p_c)
+       over realized cluster counts. The architect spec's raw Brier < 0.05
+       is *unachievable by any estimator* under honestly stochastic latent
+       truth: the refinement (irreducible) term alone is ≈0.174 for these
+       targets. The raw criterion was only satisfiable under old arm A's
+       quasi-deterministic generator; registering it verbatim would
+       preregister a guaranteed failure, so it is replaced pre-hoc by the
+       calibration-referenced form.
+    3. **Reliability convergence:** every occupied bin with n ≥ 100 has
+       |accuracy − mean confidence| < 0.06 (≈2.7 binomial σ at n=500,
+       p=0.5).
+  - **Analysis:** `python -m swarm run scenarios/calibration_proxy_fidelity.yaml
+    --seed 42 --export-json <out>` then
+    `python -m experiments.calibration_fidelity --from-run <out>`.
+  - **Disclosure:** development smoke runs before this registration used
+    seeds 42 (2×10 steps), 7 (2×100), and 5 (1×30) to verify plumbing and
+    measure throughput; they are excluded from the confirmatory analysis.
+    No confirmatory-length run was executed before this addendum was
+    committed.
+
+- **2026-07-22 — c89o confirmatory result: ALL THREE registered criteria
+  pass.** Run `runs/20260723T011931Z_calibration_proxy_fidelity_seed42`
+  (n=2458), analysis `runs/20260723T011956Z_calibration_fidelity_scenario`:
+  **ECE 0.0128** (< 0.1), **excess Brier −0.0026** (Brier 0.1874 vs
+  realized-count refinement floor 0.1900; < 0.02), **max per-bin gap
+  0.0246** (< 0.06; all six occupied bins, including the two below the
+  n≥100 scope, pass). Conclusion for the epic: `ProxyComputer` at the
+  default k is well-calibrated when latent probability is recoverable —
+  arm A's ECE 0.187 was a property of its outcome-leaking synthetic
+  generator, not of the proxy
+  ([deviation analysis](calibration-arm-a-deviation-analysis.md)).
+  Observed and disclosed: cluster volumes are imbalanced (negative-target
+  clusters n=62/82 vs ≈560 — the ecosystem marginalizes low-p agents even
+  with governance disabled), an emergent effect that does not affect the
+  criteria; expected per-cluster n≥500 was met only for four of six
+  clusters, and every bin still clears its convergence bound with margin.
+
+- **2026-09-16 — Posterior inference over proxy parameters (out of scope for
+  this registration; recorded here because it bears on Finding 4):**
+  [hmc-proxy-posterior.md](hmc-proxy-posterior.md). The `beta_swarm` proxy is
+  read as a likelihood and its six parameters sampled with dynamic HMC, instead
+  of hand-set with one knob fit by a 1-D grid. Two findings the grid could not
+  have surfaced: `base_concentration` and `evidence_scale` correlate at
+  r ≈ −0.77 (so per-axis search cannot reach the joint optimum by construction),
+  and the posterior puts almost all observable weight on counterparty
+  engagement against a hand-set 0.2 — a property of the `beta_swarm/agents.py`
+  emission models, not an established fact about real systems. A third,
+  predicted finding **failed**: tail-mass credible intervals proved too narrow
+  to flip any governance call, so that argument is withdrawn pending a
+  small-sample re-run. Does **not** overturn the
+  [deviation analysis](calibration-arm-a-deviation-analysis.md)'s Finding 4:
+  that concerns a per-interaction latent from a single realized outcome, which
+  stays under-determined; this estimates global parameters pooled across N
+  interactions, which is well-posed.
+
+- **2026-09-17 — `beta_swarm` moved out of this repo.** The code the entry above
+  refers to now lives in
+  [`swarm-ai-research/beta-swarm`](https://github.com/swarm-ai-research/beta-swarm),
+  vendored as the `beta-swarm/` submodule, so paths like `beta_swarm/agents.py`
+  are relative to that repo. Nothing about the registered design or the readouts
+  changes; this is a location note so the references stay followable. Epic `fcmy`
+  stays in this repo's bead tracker.

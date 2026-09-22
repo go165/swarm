@@ -1,0 +1,331 @@
+"""Mechanism invariants for the synthetic wiki experiment, not historical claims."""
+
+from dataclasses import replace
+
+import pytest
+
+from swarm.bridges.wiki_sim import SimulationConfig, simulate
+
+
+def test_deterministic_replay() -> None:
+    config = SimulationConfig(n_agents=8, n_tasks=4)
+    assert simulate(config, 91).to_dict() == simulate(config, 91).to_dict()
+
+
+@pytest.mark.parametrize("regime", ["authorized", "prohibited", "independent"])
+def test_finite_metrics(regime: str) -> None:
+    import math
+
+    result = simulate(SimulationConfig(sharing_regime=regime), 17)
+    assert result.events
+    assert all(math.isfinite(value) for value in result.metrics.values())
+
+
+def test_permission_label_does_not_change_behavior() -> None:
+    config = SimulationConfig(n_agents=10, n_tasks=4)
+    permitted = simulate(config, 27)
+    prohibited = simulate(replace(config, sharing_regime="prohibited"), 27)
+    # Legal status is not an agent capability or an observable causal signal.
+    def actions(result):
+        return [
+            (event["time"], event["type"], event.get("agent_id"),
+             event.get("task_id"), event.get("host_id"))
+            for event in result.events
+        ]
+
+    assert actions(permitted) == actions(prohibited)
+
+
+@pytest.mark.parametrize("changes", [
+    {"n_agents": 0}, {"n_tasks": 0}, {"n_hosts": 0},
+    {"deadline": 0}, {"research_mean": 0},
+    {"task_overlap": -0.1}, {"task_overlap": 1.1},
+    {"discovery_probability": float("nan")},
+    {"publish_probability": 1.1}, {"moderation_time": -1},
+    {"sharing_regime": "unknown"}, {"moderation_policy": "unknown"},
+    {"relocation_mode": "unknown"},
+    {"evasion_style": "unknown"}, {"page_budget_basis": "unknown"},
+    {"evasion_prefix": ""}, {"page_disruption_scope": "unknown"},
+])
+def test_invalid_configuration_rejected(changes: dict) -> None:
+    with pytest.raises(ValueError):
+        simulate(SimulationConfig(**changes), 1)
+
+
+@pytest.mark.parametrize("policy", ["ordered", "random", "lock", "global_lock"])
+def test_interventions_preserve_exogenous_tasks(policy: str) -> None:
+    config = SimulationConfig(n_agents=8, n_tasks=4, moderation_time=2)
+    control = simulate(config, 31)
+    treatment = simulate(replace(config, moderation_policy=policy), 31)
+
+    def tasks(result):
+        return [{key: event[key] for key in (
+            "time", "agent_id", "task_id", "answer_key", "deadline", "research_end"
+        )} for event in result.events if event["type"] == "task_release"]
+
+    assert tasks(control) == tasks(treatment)
+
+
+def test_independent_agents_never_use_board() -> None:
+    result = simulate(SimulationConfig(sharing_regime="independent"), 1)
+    assert not any(event["type"] in {"read", "write", "discovery"}
+                   for event in result.events)
+    assert result.metrics["shared_submission_rate"] == 0
+
+
+def test_global_write_lock_suppresses_future_publications() -> None:
+    config = SimulationConfig(discovery_probability=1, publish_probability=1,
+                              moderation_time=2)
+    control = simulate(config, 1)
+    locked = simulate(replace(config, moderation_policy="global_lock"), 1)
+    assert control.metrics["post_intervention_writes"] > 0
+    assert locked.metrics["post_intervention_writes"] == 0
+
+
+def test_page_ordered_sweep_has_equal_budget_and_evasion() -> None:
+    base = SimulationConfig(
+        n_agents=12, n_tasks=4, n_hosts=1, task_overlap=1,
+        discovery_probability=1, publish_probability=1,
+        moderation_time=2, moderation_budget=2,
+        moderation_granularity="page", page_deletion_fraction=0.5,
+        evasion_learning_probability=1.0,
+    )
+    ordered = simulate(replace(base, moderation_policy="ordered"), 12)
+    random = simulate(replace(base, moderation_policy="random"), 12)
+    ordered_removed = [event["removed_pages"] for event in ordered.events
+                        if event["type"] == "moderation"]
+    random_removed = [event["removed_pages"] for event in random.events
+                      if event["type"] == "moderation"]
+    assert ordered_removed[0] == random_removed[0] > 0
+    assert any(event.get("evasion_learned") for event in ordered.events
+               if event["type"] == "moderation")
+    assert ordered.metrics["total_writes"] >= 0
+
+
+def test_shared_submissions_have_matching_prior_read_and_publication() -> None:
+    config = SimulationConfig(n_agents=20, n_tasks=4, n_hosts=1,
+                              task_overlap=1, discovery_probability=1,
+                              publish_probability=1)
+    result = simulate(config, 5)
+    shared = [event for event in result.events
+              if event["type"] == "submission" and event["used_shared_answer"]]
+    assert shared, "Fixture must exercise copying, not pass vacuously"
+    for submission in shared:
+        source = result.events[submission["source_event_id"]]
+        assert source["type"] == "write"
+        assert source["task_id"] == submission["task_id"]
+        assert source["answer"] == submission["answer"]
+        assert source["agent_id"] != submission["agent_id"]
+        reads = [event for event in result.events[:submission["event_id"]]
+                 if event["type"] == "read"
+                 and event["agent_id"] == submission["agent_id"]
+                 and event["task_id"] == submission["task_id"]
+                 and event["source_event_id"] == source["event_id"]]
+        assert reads
+        assert source["time"] <= reads[0]["time"] <= submission["time"]
+
+
+def test_deadlines_produce_one_terminal_event_per_assignment() -> None:
+    config = SimulationConfig(n_agents=10, n_tasks=3, deadline=0.01,
+                              research_mean=100, sharing_regime="independent")
+    result = simulate(config, 4)
+    terminals = [event for event in result.events
+                 if event["type"] in {"submission", "deadline_miss"}]
+    assert len(terminals) == config.n_agents * config.n_tasks
+    assert len({(event["agent_id"], event["task_id"]) for event in terminals}) == len(terminals)
+    assert result.metrics["deadline_miss_rate"] > 0
+    assert all(event["time"] <= event["deadline"] for event in terminals
+               if event["type"] == "submission")
+
+
+def test_confirmation_summary_reports_displacement_denominators(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    sweep = subprocess.run(
+        [sys.executable, "scripts/sweep_wiki_mc.py", "--family", "moderation",
+         "--seeds", "2", "--max-cells", "3", "--output", str(tmp_path / "sweep")],
+        capture_output=True, text=True, check=True)
+    assert "pairs" in sweep.stdout
+    subprocess.run(
+        [sys.executable, "scripts/analyze_wiki_mc_confirmation.py", "--summary",
+         "--input", str(tmp_path / "sweep"), "--output", str(tmp_path / "summary.json")],
+        capture_output=True, text=True, check=True)
+    cells = json.loads((tmp_path / "summary.json").read_text())["cells"]
+    assert len(cells) == 3 and all(cell["n"] == 2 for cell in cells)
+    untreated, row = cells[0], cells[2]
+    assert untreated["disrupted_works"] == 0 and untreated["displaced_per_disrupted"] is None
+    assert row["overrides"] == '{"moderation_policy": "ordered", "relocation_mode": "endogenous"}'
+    assert 0 < row["displaced_works"] <= row["relocated_works"] <= row["disrupted_works"]
+    assert row["displaced_per_disrupted"] == row["displaced_works"] / row["disrupted_works"]
+    assert 0 <= row["alarm_wilson_low"] <= row["alarm_rate"] <= row["alarm_wilson_high"] <= 1
+    assert (tmp_path / "summary.csv").exists()
+
+
+def _zzz_config(**overrides: object) -> SimulationConfig:
+    return replace(SimulationConfig(
+        n_agents=24, n_tasks=8, n_hosts=1, task_overlap=1,
+        discovery_probability=1, publish_probability=1,
+        moderation_time=8, moderation_budget=2, moderation_interval=3,
+        moderation_granularity="page", page_deletion_fraction=0.5,
+        evasion_learning_probability=1.0, evasion_style="sort_last",
+        page_budget_basis="eligible", evasion_prefix="ZZZ",
+        page_disruption_scope="deleted", moderation_policy="ordered",
+    ), **overrides)
+
+
+def test_sort_last_renames_content_and_collapses_later_ordered_budget() -> None:
+    """ZZZ-aware evasion moves remaining pages; later ordered sweeps shrink."""
+    # Seed 0 yields ~22 post-rename reads of renamed tasks; seed 12 yields none,
+    # which made the page_name assertion below pass vacuously.
+    result = simulate(_zzz_config(), 0)
+    sweeps = [event for event in result.events if event["type"] == "moderation"]
+    assert len(sweeps) == 2
+    assert sweeps[0]["removed_pages"] > 0
+    assert sweeps[0]["eligible_pages"] == sweeps[0]["host_pages"]
+    assert any(event["type"] == "rename" for event in result.events)
+    assert sweeps[1]["eligible_pages"] < sweeps[0]["eligible_pages"]
+    assert sweeps[1]["budget"] < sweeps[0]["budget"]
+    assert sweeps[1]["removed_pages"] < sweeps[0]["removed_pages"]
+    assert result.metrics["renamed_pages"] > 0
+    assert result.metrics["prefixed_pages"] > 0
+    assert sweeps[1]["prefixed_remaining"] > 0
+    renamed_tasks = {event["page_task"] for event in result.events
+                     if event["type"] == "rename"}
+    later_reads = [event for event in result.events
+                   if event["type"] == "read" and event["time"] > sweeps[0]["time"]
+                   and event["task_id"] in renamed_tasks]
+    assert later_reads, "no post-rename reads of a renamed task; assertion would be vacuous"
+    assert all(str(event.get("page_name", "")).startswith("ZZZ")
+               for event in later_reads)
+
+
+def test_disruption_scope_is_independent_of_evasion_style() -> None:
+    """With learning off the rename never fires, so style alone must not move
+    displacements; the scope knob is what does."""
+    base = SimulationConfig(moderation_policy="ordered", moderation_granularity="page",
+                            evasion_learning_probability=0.0)
+    by_style = {style: simulate(replace(base, evasion_style=style), 7).metrics
+                for style in ("exclude", "sort_last")}
+    assert by_style["exclude"]["displacements"] == by_style["sort_last"]["displacements"]
+    assert by_style["exclude"]["displacements"] > 0
+    scoped = simulate(replace(base, page_disruption_scope="deleted"), 7).metrics
+    assert scoped["displacements"] < by_style["exclude"]["displacements"]
+
+
+def test_sort_last_prefix_does_not_shrink_random_eligible_set() -> None:
+    """A random sweep has no alphabetical window, so a ZZZ prefix is not a dodge."""
+    ordered = simulate(_zzz_config(moderation_policy="ordered"), 12)
+    random = simulate(_zzz_config(moderation_policy="random"), 12)
+    ordered_sweeps = [event for event in ordered.events if event["type"] == "moderation"]
+    random_sweeps = [event for event in random.events if event["type"] == "moderation"]
+    assert ordered_sweeps[0]["removed_pages"] == random_sweeps[0]["removed_pages"] > 0
+    assert not any(event["type"] == "rename" for event in random.events)
+    assert random_sweeps[1]["eligible_pages"] == random_sweeps[1]["host_pages"]
+    assert ordered_sweeps[1]["eligible_pages"] < ordered_sweeps[1]["host_pages"]
+    assert ordered_sweeps[1]["removed_pages"] < random_sweeps[1]["removed_pages"]
+
+
+def test_published_exclude_evasion_still_uses_host_budget() -> None:
+    """Default exclude+host cells must keep the published equal-budget rule."""
+    base = SimulationConfig(
+        n_agents=12, n_tasks=4, n_hosts=1, task_overlap=1,
+        discovery_probability=1, publish_probability=1,
+        moderation_time=2, moderation_budget=2,
+        moderation_granularity="page", page_deletion_fraction=0.5,
+        evasion_learning_probability=1.0,
+    )
+    ordered = simulate(replace(base, moderation_policy="ordered"), 12)
+    random = simulate(replace(base, moderation_policy="random"), 12)
+    ordered_sweeps = [event for event in ordered.events if event["type"] == "moderation"]
+    random_sweeps = [event for event in random.events if event["type"] == "moderation"]
+    assert ordered_sweeps[0]["removed_pages"] == random_sweeps[0]["removed_pages"] > 0
+    assert not any(event["type"] == "rename" for event in ordered.events)
+    # Learners drop out of eligible without moving pages, so the host still
+    # holds content under the original names after everyone has learned.
+    assert ordered_sweeps[1]["eligible_pages"] == 0
+    assert ordered_sweeps[1]["host_pages"] > 0
+    assert ordered_sweeps[1]["removed_pages"] == ordered_sweeps[1]["budget"] == 0
+
+
+def test_zzz_sweep_smoke_emits_new_metrics(tmp_path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    config = tmp_path / "page_zzz.json"
+    config.write_text(json.dumps({
+        "moderation_granularity": "page",
+        "evasion_learning_probability": 1.0,
+        "evasion_style": "sort_last",
+        "page_budget_basis": "eligible",
+        "evasion_prefix": "ZZZ",
+        "page_disruption_scope": "deleted",
+    }))
+    sweep = subprocess.run(
+        [sys.executable, "scripts/sweep_wiki_mc.py", "--family", "moderation",
+         "--seeds", "2", "--max-cells", "3", "--config", str(config),
+         "--output", str(tmp_path / "sweep")],
+        capture_output=True, text=True, check=True)
+    assert "pairs" in sweep.stdout
+    subprocess.run(
+        [sys.executable, "scripts/analyze_wiki_mc_confirmation.py", "--summary",
+         "--input", str(tmp_path / "sweep"), "--output", str(tmp_path / "summary.json")],
+        capture_output=True, text=True, check=True)
+    cells = json.loads((tmp_path / "summary.json").read_text())["cells"]
+    treated = next(cell for cell in cells
+                   if "ordered" in cell["overrides"])
+    assert treated["renamed_pages_mean"] > 0
+    assert treated["prefixed_pages_mean"] > 0
+    assert treated["eligible_pages_mean"] > 0
+    payload = json.loads(sorted((tmp_path / "sweep").glob("moderation-002-seed-*.json"))[0].read_text())
+    assert payload["treatment"]["config"]["evasion_style"] == "sort_last"
+    assert payload["treatment"]["config"]["page_budget_basis"] == "eligible"
+    assert payload["treatment"]["config"]["page_disruption_scope"] == "deleted"
+
+
+def _page_base(**overrides: object) -> SimulationConfig:
+    return replace(SimulationConfig(
+        n_agents=12, n_tasks=4, n_hosts=2, task_overlap=1,
+        discovery_probability=1, publish_probability=1,
+        moderation_time=2, moderation_budget=3, moderation_interval=1,
+        moderation_granularity="page", page_deletion_fraction=0.5,
+        evasion_learning_probability=1.0, moderation_policy="ordered",
+    ), **overrides)
+
+
+def test_eligible_budget_basis_reduces_sweep_size_once_authors_evade() -> None:
+    whole = simulate(_page_base(page_budget_basis="host"), 3)
+    elig = simulate(_page_base(page_budget_basis="eligible"), 3)
+    whole_removed = [e["removed_pages"] for e in whole.events if e["type"] == "moderation"]
+    elig_removed = [e["removed_pages"] for e in elig.events if e["type"] == "moderation"]
+    # Nobody has learned before the first sweep, so the two bases agree there.
+    assert whole_removed[0] == elig_removed[0] > 0
+    assert sum(elig_removed) <= sum(whole_removed)
+
+
+def test_evasion_move_relocates_evader_pages_to_another_host() -> None:
+    moved = simulate(_page_base(evasion_style="move"), 7)
+    mods = [e for e in moved.events if e["type"] == "moderation"]
+    assert any(e["moved_pages"] for e in mods)
+    moves = [e for e in moved.events if e["type"] == "move"]
+    assert moves and moved.metrics["moved_pages"] == len(moves)
+    assert all(e["host_id"] != e["from_host_id"] for e in moves)
+    assert not any(e["type"] == "rename" for e in moved.events)
+    # A moved page survives on the refuge host: total pages removed over the
+    # run cannot exceed the exclude rule, where evaders' pages stay put.
+    exclude = simulate(_page_base(evasion_style="exclude"), 7)
+    exclude_mods = [e for e in exclude.events if e["type"] == "moderation"]
+    assert sum(e["removed_pages"] for e in mods) <= sum(e["removed_pages"] for e in exclude_mods)
+
+
+def test_evasion_move_needs_a_refuge_host() -> None:
+    single = simulate(_page_base(evasion_style="move", n_hosts=1), 7)
+    assert single.metrics["moved_pages"] == 0
+    assert single.metrics["evasion_learned"] > 0
+
+
+def test_evasion_style_validated() -> None:
+    with pytest.raises(ValueError):
+        SimulationConfig(evasion_style="teleport")

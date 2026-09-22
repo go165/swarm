@@ -4,6 +4,7 @@ This module provides the main interface for running red-team evaluations
 against governance configurations.
 """
 
+import random
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -356,13 +357,6 @@ class RedTeamEvaluator:
             scenario=scenario,
         )
 
-        # Create orchestrator with governance config
-        # orchestrator = orchestrator_factory(self.governance_config)
-
-        # Simulate attack based on scenario parameters
-        # This is a placeholder - actual implementation would run
-        # the orchestrator with adaptive adversaries
-
         result.epochs_run = epochs
 
         # Simulate outcomes based on governance config and attack type
@@ -430,6 +424,61 @@ class RedTeamEvaluator:
             if not has_sybil_detection and not has_collusion_detection:
                 base_success *= 1.3
 
+        elif scenario.attack_id == "out_of_band_channel":
+            # Field-evidence exhibit (collusion.wiki replay): pairwise, group
+            # and structural collusion detection saturate on a hub page and do
+            # not reduce success, so ``has_collusion_detection`` deliberately
+            # has no effect here. An aggregate volume monitor does (it led the
+            # human moderator by three days); closing the write path to the
+            # substrate is a capability precondition that prevents the attack
+            # rather than detecting it.
+            has_volume_monitor = self.governance_config.get(
+                "volume_monitor_enabled", False
+            )
+            has_population_monitor = self.governance_config.get(
+                "substrate_population_monitor_enabled", False
+            )
+            has_egress_allowlist = self.governance_config.get(
+                "egress_allowlist_enabled", False
+            )
+            # Watch the population of hosts, not the host you found (vv3j.8):
+            # a per-host monitor's effect decays as the swarm gains substrates
+            # to relocate across; the population monitor's does not.
+            n_hosts = max(1, int(scenario.adversary_config.get("n_hosts", 1)))
+            per_host_factor = 0.4 + 0.6 * (1.0 - 1.0 / n_hosts)
+            if has_egress_allowlist:
+                base_success *= 0.05
+            elif has_population_monitor:
+                base_success *= 0.4
+                result.collusion_detected = True
+            elif has_volume_monitor:
+                base_success *= per_host_factor
+                result.collusion_detected = n_hosts == 1
+            else:
+                base_success *= 1.3
+
+        elif scenario.attack_id == "provenance_replay":
+            # Artifact replay study (bead iujo): binding strips a receipt shown
+            # by anyone but its producer before acceptance, so it prevents the
+            # attack. The post-accept detector caught half the replays but its
+            # penalty never reached counterparty acceptance, so on its own it
+            # does not reduce success. One presenter and no pair structure
+            # leaves collusion detection nothing to see. Only a detector whose
+            # flags reach a freeze could select; that pairing is untested there.
+            has_binding = self.governance_config.get(
+                "artifact_context_binding_enabled", False
+            )
+            has_replay_detection = self.governance_config.get(
+                "artifact_replay_detection_enabled", False
+            )
+            if has_binding:
+                base_success *= 0.05
+            elif has_replay_detection and has_circuit_breaker:
+                base_success *= 0.6
+            else:
+                # 241.8 of 242.2 replays accepted with no lever
+                base_success *= 1.2
+
         # General defense effects
         if has_staking:
             base_success *= 0.9
@@ -448,8 +497,6 @@ class RedTeamEvaluator:
         base_success *= difficulty_modifier
 
         # Determine outcome
-        import random
-
         result.attack_succeeded = random.random() < min(1.0, base_success)
         result.governance_prevented = not result.attack_succeeded
 
@@ -523,6 +570,44 @@ class RedTeamEvaluator:
             ):
                 recommendations.append(
                     "Enable collusion detection to identify coordinated attacks"
+                )
+
+        if not self.governance_config.get("volume_monitor_enabled"):
+            if any(
+                r.attack_id == "out_of_band_channel" and r.attack_succeeded
+                for r in self.attack_results
+            ):
+                recommendations.append(
+                    "Add an aggregate volume/rate monitor: out-of-band "
+                    "coordination saturates pairwise/structural collusion "
+                    "detection and is only visible as volume (collusion.wiki replay)"
+                )
+        if self.governance_config.get("volume_monitor_enabled") and not (
+            self.governance_config.get("substrate_population_monitor_enabled")
+        ):
+            if any(
+                r.attack_id == "out_of_band_channel"
+                and r.attack_succeeded
+                and int(r.scenario.adversary_config.get("n_hosts", 1)) > 1
+                for r in self.attack_results
+            ):
+                recommendations.append(
+                    "Watch the population of hosts, not the host you found: a "
+                    "per-host volume monitor acts on the caught substrate and a "
+                    "swarm with a choice sits on the one that is not (wiki-board "
+                    "substrate gap)"
+                )
+
+        if not self.governance_config.get("artifact_context_binding_enabled"):
+            if any(
+                r.attack_id == "provenance_replay" and r.attack_succeeded
+                for r in self.attack_results
+            ):
+                recommendations.append(
+                    "Bind artifacts to their producer before acceptance: a "
+                    "replayed receipt carries quality earned elsewhere, and a "
+                    "post-accept replay detector penalizes without changing who "
+                    "is accepted (artifact replay study)"
                 )
 
         if not self.governance_config.get("audit_enabled"):

@@ -22,7 +22,7 @@ from swarm.api.models.attestation import (
     ReceiptResponse,
 )
 from swarm.attestation.middleware import AttestationMiddleware
-from swarm.attestation.receipt import ExecutionBounds
+from swarm.attestation.receipt import AdmissibilityReceipt, ExecutionBounds
 from swarm.attestation.relay import ReceiptRelay, RelayMessage
 from swarm.attestation.signer import ReceiptSigner, ReceiptVerifier
 from swarm.models.events import Event, EventType
@@ -40,7 +40,9 @@ class _AttestationState:
 
     def __init__(self) -> None:
         self.signer = ReceiptSigner()
-        verifier = ReceiptVerifier(self.signer.secret_key_hex)
+        # Verification needs no secret: the relay trusts exactly this
+        # process's signing DID (bead jxyi).
+        verifier = ReceiptVerifier(trusted_signers={self.signer.did})
         self.middleware = AttestationMiddleware(signer=self.signer)
         self.relay = ReceiptRelay(verifier=verifier)
 
@@ -63,7 +65,7 @@ MiddlewareDep = Annotated[AttestationMiddleware, Depends(_get_middleware)]
 RelayDep = Annotated[ReceiptRelay, Depends(_get_relay)]
 
 
-def _receipt_to_response(receipt) -> ReceiptResponse:  # type: ignore[no-untyped-def]
+def _receipt_to_response(receipt: AdmissibilityReceipt) -> ReceiptResponse:
     return ReceiptResponse(
         receipt_id=receipt.receipt_id,
         timestamp=receipt.timestamp,

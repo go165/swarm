@@ -25,6 +25,12 @@ if TYPE_CHECKING:
 # ----- Memory bounds -----
 MAX_TRACKING_SET_SIZE: int = 200
 
+# Starting value for the epochs-since counters: far enough back that an agent
+# which has never been detected or penalized does not read as "just caught".
+# A 0 here made _should_lay_low true forever unless someone called
+# update_adversary_outcome, and nothing in the run loop does (beads-2qgp).
+NEVER: int = 10**6
+
 
 class AttackStrategy(Enum):
     """Types of adversarial attack strategies."""
@@ -118,8 +124,8 @@ class AdversaryMemory:
     potential_allies: Set[str] = field(default_factory=set)
 
     # Timing
-    epochs_since_detection: int = 0
-    epochs_since_penalty: int = 0
+    epochs_since_detection: int = NEVER
+    epochs_since_penalty: int = NEVER
     current_heat_level: float = 0.0  # How much attention we're drawing
 
     def update_heat(self, detected: bool, penalty: float) -> None:
@@ -190,6 +196,7 @@ class AdaptiveAdversary(BaseAgent):
         self.in_reputation_building_phase = True
         self.reputation_threshold = 5.0  # Build rep before attacking
         self.attack_cooldown = 0
+        self._last_epoch_seen: Optional[int] = None
 
     def select_strategy(self) -> AttackStrategy:
         """Select strategy using epsilon-greedy with UCB."""
@@ -252,6 +259,14 @@ class AdaptiveAdversary(BaseAgent):
 
     def _update_memory(self, observation: Observation) -> None:
         """Update memory from observation."""
+        # Advance the epochs-since counters and decay heat once per elapsed
+        # epoch; act() runs every step, so key on the epoch number.
+        epoch = observation.current_epoch
+        if self._last_epoch_seen is not None and epoch > self._last_epoch_seen:
+            for _ in range(epoch - self._last_epoch_seen):
+                self.memory.update_heat(detected=False, penalty=0.0)
+        self._last_epoch_seen = epoch
+
         # Identify potential allies (other adversarial agents)
         for agent in observation.visible_agents:
             agent_type = agent.get("agent_type", "")
@@ -301,6 +316,7 @@ class AdaptiveAdversary(BaseAgent):
         # Post helpful content
         if self._rng.random() < 0.3:
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.POST,
                 content="Here's a helpful update on recent progress.",
             )
@@ -309,13 +325,14 @@ class AdaptiveAdversary(BaseAgent):
         if observation.visible_posts:
             popular = max(observation.visible_posts, key=lambda p: p.get("votes", 0))
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.VOTE,
                 target_id=popular.get("post_id") or "",
                 vote_direction=1,  # Upvote
             )
 
         # Do nothing
-        return Action(action_type=ActionType.NOOP)
+        return Action(action_type=ActionType.NOOP, agent_id=self.agent_id)
 
     def _act_reputation_farming(self, observation: Observation) -> Action:
         """Build reputation through legitimate-looking activity."""
@@ -331,13 +348,15 @@ class AdaptiveAdversary(BaseAgent):
             if honest_agents and self._rng.random() < 0.5:
                 target = self._rng.choice(honest_agents)
                 return Action(
+                    agent_id=self.agent_id,
                     action_type=ActionType.PROPOSE_INTERACTION,
-                    target_id=target.get("agent_id") or "",
+                    counterparty_id=target.get("agent_id") or "",
                     content="Let's work together on this task.",
                 )
 
             # Post valuable content
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.POST,
                 content="Sharing knowledge to help the community.",
             )
@@ -358,8 +377,9 @@ class AdaptiveAdversary(BaseAgent):
             # Collaborate with ally
             ally = self._rng.choice(allies)
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.PROPOSE_INTERACTION,
-                target_id=ally.get("agent_id") or "",
+                counterparty_id=ally.get("agent_id") or "",
                 content="Internal coordination.",
             )
 
@@ -370,10 +390,11 @@ class AdaptiveAdversary(BaseAgent):
         """Stay under the radar."""
         # Minimal activity
         if self._rng.random() < 0.7:
-            return Action(action_type=ActionType.NOOP)
+            return Action(action_type=ActionType.NOOP, agent_id=self.agent_id)
 
         # Occasional innocent post
         return Action(
+            agent_id=self.agent_id,
             action_type=ActionType.POST,
             content="Just checking in.",
         )
@@ -393,13 +414,15 @@ class AdaptiveAdversary(BaseAgent):
             # Collaborate like honest agents do
             target = self._rng.choice(honest_agents)
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.PROPOSE_INTERACTION,
-                target_id=target.get("agent_id") or "",
+                counterparty_id=target.get("agent_id") or "",
                 content="Would you like to collaborate?",
             )
 
         # Post similar content
         return Action(
+            agent_id=self.agent_id,
             action_type=ActionType.POST,
             content="Contributing to the community discussion.",
         )
@@ -444,8 +467,9 @@ class AdaptiveAdversary(BaseAgent):
                 # Set cooldown after attack
                 self.attack_cooldown = 3
                 return Action(
+                    agent_id=self.agent_id,
                     action_type=ActionType.PROPOSE_INTERACTION,
-                    target_id=target.get("agent_id") or "",
+                    counterparty_id=target.get("agent_id") or "",
                     content="Special opportunity for collaboration.",
                 )
 
@@ -498,13 +522,15 @@ class AdaptiveAdversary(BaseAgent):
         if targets and self._rng.random() < 0.5:
             target = self._rng.choice(targets)
             return Action(
+                agent_id=self.agent_id,
                 action_type=ActionType.PROPOSE_INTERACTION,
-                target_id=target.get("agent_id") or "",
+                counterparty_id=target.get("agent_id") or "",
                 content="Interested in collaborating?",
             )
 
         # Otherwise post
         return Action(
+            agent_id=self.agent_id,
             action_type=ActionType.POST,
             content="Sharing some thoughts.",
         )
@@ -571,12 +597,14 @@ class AdaptiveAdversary(BaseAgent):
         interaction: "SoftInteraction",
         payoff: float,
     ) -> None:
-        """Update from interaction outcome (base class compatibility)."""
-        # Call base class update
-        super().update_from_outcome(interaction, payoff)
+        """Update from interaction outcome.
 
-        # Track payoff in memory
-        self.memory.recent_payoffs.append(payoff)
+        The run loop calls this for every finalized interaction, so it is where
+        the bandit learns payoffs; governance feedback arrives separately
+        through ``observe_governance`` (beads-ehw8).
+        """
+        super().update_from_outcome(interaction, payoff)
+        self._record_payoff(payoff, self.current_strategy)
         self._keep_memory_bounded()
 
     def update_adversary_outcome(
@@ -586,35 +614,47 @@ class AdaptiveAdversary(BaseAgent):
         detected: bool,
         strategy_used: Optional[AttackStrategy] = None,
     ) -> None:
-        """Update learning from adversarial outcome with detection info."""
+        """Record one outcome with its payoff and governance response together."""
         strategy = strategy_used or self.current_strategy
+        self._record_payoff(payoff, strategy)
+        self._record_governance(penalty, detected, strategy)
+        self._keep_memory_bounded()
+        self.memory.update_heat(detected, penalty)
 
-        # Update strategy performance
+    def observe_governance(self, penalty: float, detected: bool) -> None:
+        """React to a governance action against this agent (freeze or penalty).
+
+        Called by the finalizer whenever an applied governance effect freezes
+        or penalizes this agent. Heat decays once per epoch in
+        ``_update_memory`` rather than here, since this only fires on actions.
+        """
+        self._record_governance(penalty, detected, self.current_strategy)
+        self._keep_memory_bounded()
+        self.memory.update_heat(detected, penalty)
+
+    def _record_payoff(self, payoff: float, strategy: AttackStrategy) -> None:
         perf = self.strategy_performance[strategy]
         perf.attempts += 1
         perf.total_payoff += payoff
-        perf.total_penalty += penalty
-
         if payoff > 0:
             perf.successes += 1
+        self.memory.recent_payoffs.append(payoff)
+
+    def _record_governance(
+        self, penalty: float, detected: bool, strategy: AttackStrategy
+    ) -> None:
+        perf = self.strategy_performance[strategy]
+        perf.total_penalty += penalty
         if detected:
             perf.detected += 1
-
-        # Update memory
-        self.memory.recent_payoffs.append(payoff)
         self.memory.recent_penalties.append(penalty)
         self.memory.recent_detections.append(detected)
-
-        self._keep_memory_bounded()
-
-        # Update heat level
-        self.memory.update_heat(detected, penalty)
-
-        # Adapt thresholds based on detections
         if detected:
-            # We crossed a threshold - be more conservative
-            self.memory.estimated_toxicity_threshold *= 0.95
-            self.memory.estimated_frequency_threshold *= 0.95
+            # Crossed a threshold: shade the estimates down. The default
+            # learning_rate of 0.1 gives the original fixed factor of 0.95.
+            shrink = 1.0 - 0.5 * self.learning_rate
+            self.memory.estimated_toxicity_threshold *= shrink
+            self.memory.estimated_frequency_threshold *= shrink
 
     def _keep_memory_bounded(self) -> None:
         """Keep memory lists and tracking sets at bounded size."""

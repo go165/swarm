@@ -134,14 +134,17 @@ class AdmissibilityReceipt(BaseModel):
         description="Soft-label confidence p ∈ [0, 1] for the attested action",
     )
 
-    # Cryptographic seal (HMAC-SHA256 — symmetric; suitable only for trusted
-    # single-signer environments where signer and verifier share a secret key)
+    # Cryptographic seal: Ed25519 over canonical_bytes(); signer_id is the
+    # signing key's DID, so verification needs no shared secret (bead jxyi).
+    # Receipts sealed before that change carry HMAC-SHA256 and a non-DID id.
     signature: Optional[str] = Field(
         None,
-        description="Hex-encoded HMAC-SHA256 signature over the canonical receipt",
+        description="Hex-encoded Ed25519 signature over the canonical receipt "
+        "(HMAC-SHA256 on legacy receipts)",
     )
     signer_id: Optional[str] = Field(
-        None, description="Identity of the signer (key ID or agent ID)"
+        None,
+        description="Signer DID (did:key:ed25519:<hex>), derived from the signing key",
     )
 
     # Routing
@@ -156,8 +159,9 @@ class AdmissibilityReceipt(BaseModel):
     def canonical_bytes(self) -> bytes:
         """Return the deterministic byte representation used for signing.
 
-        Excludes ``signature`` and ``signer_id`` so they can be set after
-        computing the digest.
+        Excludes ``signature``, ``signer_id``, and ``status`` so they can be
+        set after computing the digest.  Status must be excluded to preserve
+        receipt verifiability across status transitions (e.g., PENDING → SEALED).
         """
         obj = self.model_dump(exclude={"signature", "signer_id", "status"})
         # datetime → ISO string for JSON determinism
