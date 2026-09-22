@@ -117,7 +117,7 @@ class ScenarioConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scenario_id: str
-    description: str
+    description: str | None = None
     motif: str | None = None
 
     agents: list[AgentSpec] | None = None
@@ -130,23 +130,30 @@ class ScenarioConfig(BaseModel):
     network: NetworkConfig | None = None
 
     awm: dict[str, Any] | None = None
+    board: dict[str, Any] | None = None
     boundaries: dict[str, Any] | None = None
+    bridge: dict[str, Any] | str | None = None
     bridge_config: dict[str, Any] | None = None
     community: dict[str, Any] | None = None
     composite_tasks: dict[str, Any] | None = None
+    condition_prompts: dict[str, Any] | None = None
     contracts: dict[str, Any] | None = None
     csm: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
     delivery: dict[str, Any] | None = None
     dilemma: dict[str, Any] | None = None
     docker: dict[str, Any] | None = None
     domain: dict[str, Any] | None = None
     drift_detection: dict[str, Any] | None = None
     dynamic_toxicity: dict[str, Any] | None = None
+    env: dict[str, Any] | None = None
     environment: dict[str, Any] | None = None
     evo_game: dict[str, Any] | None = None
     evoskill: dict[str, Any] | None = None
     flash_crash: dict[str, Any] | None = None
     horizon_eval: dict[str, Any] | None = None
+    kernel_oracle: dict[str, Any] | None = None
+    kind: str | None = None
     letta: dict[str, Any] | None = None
     llm: dict[str, Any] | None = None
     marketplace: dict[str, Any] | None = None
@@ -159,16 +166,41 @@ class ScenarioConfig(BaseModel):
     persona_expansion: dict[str, Any] | None = None
     perturbations: dict[str, Any] | None = None
     prime_intellect: dict[str, Any] | None = None
+    replay: dict[str, Any] | None = None
+    resampling: dict[str, Any] | None = None
     resource_negotiation: dict[str, Any] | None = None
     rivals: dict[str, Any] | None = None
     scholar: dict[str, Any] | None = None
+    seed: int | None = None
     seed_personas: list[dict[str, Any]] | None = None
+    source: dict[str, Any] | str | None = None
     spawn: dict[str, Any] | None = None
     sweep: dict[str, Any] | None = None
+    synthetic: dict[str, Any] | None = None
     task_prompt: str | None = None
+    tasks: list[dict[str, Any]] | dict[str, Any] | None = None
     thread_generation: dict[str, Any] | None = None
     tierra: dict[str, Any] | None = None
     whatif_injections: list[dict[str, Any]] | None = None
+    work_regime: dict[str, Any] | None = None
+
+    # Top-level keys used by standalone experiment drivers whose configs
+    # live in scenarios/ (deadline_pressure.yaml, loan_commitment.yaml).
+    borrower: dict[str, Any] | None = None
+    cost_ticks: dict[str, Any] | list[Any] | None = None
+    deadlines: dict[str, Any] | list[Any] | None = None
+    downstream_tokens: int | None = None
+    generated_token_budget: int | None = None
+    heterogeneity_panel: dict[str, Any] | list[Any] | None = None
+    investment: dict[str, Any] | None = None
+    max_tokens_per_call: int | None = None
+    model: str | None = None
+    n_borrowers: int | None = None
+    own_capital: float | None = None
+    principal_sigma: float | None = None
+    replicates: int | None = None
+    task: dict[str, Any] | str | None = None
+    terms: dict[str, Any] | None = None
 
 
 def validate_scenario_config(data: Any) -> ScenarioConfig:

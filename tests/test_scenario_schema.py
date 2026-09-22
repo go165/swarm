@@ -21,8 +21,27 @@ def _minimal_valid_scenario() -> dict:
     }
 
 
+SCENARIOS_DIR = Path(__file__).resolve().parent.parent / "scenarios"
+
+
+def _checked_in_scenarios() -> list[Path]:
+    """Every scenario YAML `load_scenario()` can be pointed at.
+
+    `sweeps/` subdirectories hold sweep configs (``sweep_id`` /
+    ``base_scenario``), a different shape that never reaches
+    `load_scenario()`, so they are excluded.
+    """
+    return sorted(
+        p
+        for p in SCENARIOS_DIR.rglob("*.yaml")
+        if "sweeps" not in p.relative_to(SCENARIOS_DIR).parts
+    )
+
+
 def test_all_checked_in_scenarios_pass_schema_validation():
-    for path in Path("scenarios").glob("*.yaml"):
+    paths = _checked_in_scenarios()
+    assert paths, "no scenario YAML files found"
+    for path in paths:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
         ScenarioConfig.model_validate(payload)
 
