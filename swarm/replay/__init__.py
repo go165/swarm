@@ -1,6 +1,5 @@
 """Replay utilities for repeated scenario execution."""
 
-from swarm.replay.episode_spec import EpisodeSpec
 from swarm.replay.diff import (
     MetricDelta,
     compare_run_files,
@@ -9,6 +8,7 @@ from swarm.replay.diff import (
     load_run_metrics,
     normalize_run_metrics,
 )
+from swarm.replay.episode_spec import EpisodeSpec
 from swarm.replay.runner import ReplayRunner, ReplayRunResult
 from swarm.replay.verifier import (
     SynthesizedTaskVerifier,
